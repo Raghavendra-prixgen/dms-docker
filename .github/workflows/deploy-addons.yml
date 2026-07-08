@@ -1,0 +1,31 @@
+name: Deploy Odoo Addons
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "custom-addons/**"
+      - "odoo.conf"
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Pull latest changes
+        run: |
+          cd /opt/odoo
+          git pull origin main
+
+      - name: Restart Odoo
+        run: |
+          cd /opt/odoo
+          docker compose restart odoo
+
+      - name: Check Status
+        run: |
+          docker ps
