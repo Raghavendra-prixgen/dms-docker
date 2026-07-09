@@ -8,6 +8,10 @@ on:
       - "custom-addons/**"
       - "odoo.conf"
 
+concurrency:
+  group: deploy-addons
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: self-hosted
