@@ -26,7 +26,7 @@ services:
       - db
 
     ports:
-      - "8069:8069"
+      - "8074:8069"
 
     volumes:
       - ./custom-addons:/mnt/extra-addons
