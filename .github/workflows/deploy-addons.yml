@@ -1,227 +1,69 @@
-name: Test Self-Hosted Runner
-
+name: Deploy Odoo Addons
 on:
   push:
     branches:
       - main
+    paths:
+      - "custom-addons/**"
+      - "odoo.conf"
+
+concurrency:
+  group: deploy-addons
+  cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: self-hosted
-
     steps:
-      - name: Runner Information
+      - name: Debug
         run: |
-          echo "Runner is working!"
           whoami
-          hostname
           pwd
-          git --version
+          groups
+          docker ps
 
-      - name: Pull latest code
+      - name: Pull latest changes
         run: |
-          cd /home/prixgen/Downloads/dms-docker
+          cd /home/prixgen/Downloads/actions-runner/_work/dms-docker/dms-docker
           git pull origin main
 
-      - name: Verify latest commit
+      - name: Detect changed addons
+        id: changed
         run: |
-          cd /home/prixgen/Downloads/dms-docker
-          git log --oneline -1
-          git status
+          cd /home/prixgen/Downloads/actions-runner/_work/dms-docker/dms-docker
+          MODULES=$(git diff --name-only HEAD@{1} HEAD -- custom-addons \
+            | awk -F/ '{print $2}' | sort -u | paste -sd, -)
+          echo "modules=$MODULES" >> "$GITHUB_OUTPUT"
+          echo "Changed modules: $MODULES"
 
-      - name: List custom addons
+      - name: Detect databases
+        id: dbs
+        if: steps.changed.outputs.modules != ''
         run: |
-          ls -la /home/prixgen/Downloads/dms-docker/custom-addons
+          cd /home/prixgen/Downloads/actions-runner/_work/dms-docker/dms-docker
+          DBS=$(docker compose exec -T db psql -U odoo -d postgres -tAc \
+            "SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres');")
+          echo "list<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$DBS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "Found databases:"
+          echo "$DBS"
 
+      - name: Update changed modules on all databases
+        if: steps.changed.outputs.modules != ''
+        run: |
+          cd /home/prixgen/Downloads/actions-runner/_work/dms-docker/dms-docker
+          while IFS= read -r db; do
+            [ -z "$db" ] && continue
+            echo "Updating ${{ steps.changed.outputs.modules }} on $db"
+            docker compose exec -T odoo odoo-bin -u "${{ steps.changed.outputs.modules }}" -d "$db" --stop-after-init
+          done <<< "${{ steps.dbs.outputs.list }}"
 
-# name: Deploy Odoo Addons
+      - name: Restart Odoo
+        run: |
+          cd /home/prixgen/Downloads/actions-runner/_work/dms-docker/dms-docker
+          docker compose restart odoo
 
-# on:
-#   push:
-#     branches:
-#       - main
-#     paths:
-#       - "custom-addons/**"
-#       - "odoo.conf"
-
-# concurrency:
-#   group: deploy-addons
-#   cancel-in-progress: true
-
-# jobs:
-#   deploy:
-#     runs-on: self-hosted
-
-#     steps:
-#       - name: Checkout Repository
-#         uses: actions/checkout@v4
-
-#       - name: Debug
-#         run: |
-#           echo "Workspace: $GITHUB_WORKSPACE"
-#           whoami
-#           pwd
-#           groups
-#           ls -la
-#           docker ps
-
-#       - name: Detect changed addons
-#         id: changed
-#         run: |
-#           cd "$GITHUB_WORKSPACE"
-
-#           MODULES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} -- custom-addons \
-#             | awk -F/ '{print $2}' | sort -u | paste -sd, -)
-
-#           echo "modules=$MODULES" >> "$GITHUB_OUTPUT"
-#           echo "Changed modules: $MODULES"
-
-#       - name: Detect databases
-#         id: dbs
-#         if: steps.changed.outputs.modules != ''
-#         run: |
-#           cd "$GITHUB_WORKSPACE"
-
-#           DBS=$(docker compose exec -T db psql \
-#             -U odoo \
-#             -d postgres \
-#             -tAc "SELECT datname
-#                   FROM pg_database
-#                   WHERE datistemplate = false
-#                   AND datname NOT IN ('postgres');")
-
-#           echo "list<<EOF" >> "$GITHUB_OUTPUT"
-#           echo "$DBS" >> "$GITHUB_OUTPUT"
-#           echo "EOF" >> "$GITHUB_OUTPUT"
-
-#           echo "Found databases:"
-#           echo "$DBS"
-
-#       - name: Update changed modules on all databases
-#         if: steps.changed.outputs.modules != ''
-#         run: |
-#           cd "$GITHUB_WORKSPACE"
-
-#           while IFS= read -r db; do
-#             [ -z "$db" ] && continue
-
-#             echo "Updating ${{ steps.changed.outputs.modules }} on $db"
-
-#             docker compose exec -T odoo \
-#               odoo-bin \
-#               -u "${{ steps.changed.outputs.modules }}" \
-#               -d "$db" \
-#               --stop-after-init
-
-#           done <<< "${{ steps.dbs.outputs.list }}"
-
-#       - name: Restart Odoo
-#         run: |
-#           cd "$GITHUB_WORKSPACE"
-#           docker compose restart odoo
-
-#       - name: Check Status
-#         run: |
-#           docker ps
-#           docker compose ps
-
-
-# on:
-#   push:
-#     branches:
-#       - main
-#     paths:
-#       - "custom-addons/**"
-#       - "odoo.conf"
-
-# concurrency:
-#   group: deploy-addons
-#   cancel-in-progress: true
-
-# jobs:
-#   deploy:
-#     runs-on: self-hosted
-#     steps:
-#       - name: Debug
-#         run: |
-#           whoami
-#           pwd
-#           groups
-#           docker ps
-
-#       - name: Pull latest changes
-#         run: |
-#           cd /home/prixgen/Downloads/dms-docker
-#           git pull origin main
-
-#       - name: Detect changed addons
-#         id: changed
-#         run: |
-#           cd /home/prixgen/Downloads/dms-docker
-#           MODULES=$(git diff --name-only HEAD@{1} HEAD -- custom-addons \
-#             | awk -F/ '{print $2}' | sort -u | paste -sd, -)
-#           echo "modules=$MODULES" >> "$GITHUB_OUTPUT"
-#           echo "Changed modules: $MODULES"
-
-#       - name: Detect databases
-#         id: dbs
-#         if: steps.changed.outputs.modules != ''
-#         run: |
-#           cd /home/prixgen/Downloads/dms-docker
-#           DBS=$(docker compose exec -T db psql -U odoo -d postgres -tAc \
-#             "SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres');")
-#           echo "list<<EOF" >> "$GITHUB_OUTPUT"
-#           echo "$DBS" >> "$GITHUB_OUTPUT"
-#           echo "EOF" >> "$GITHUB_OUTPUT"
-#           echo "Found databases:"
-#           echo "$DBS"
-
-#       - name: Update changed modules on all databases
-#         if: steps.changed.outputs.modules != ''
-#         run: |
-#           cd /home/prixgen/Downloads/dms-docker
-#           while IFS= read -r db; do
-#             [ -z "$db" ] && continue
-#             echo "Updating ${{ steps.changed.outputs.modules }} on $db"
-#             docker compose exec -T odoo odoo-bin -u "${{ steps.changed.outputs.modules }}" -d "$db" --stop-after-init
-#           done <<< "${{ steps.dbs.outputs.list }}"
-
-#       - name: Restart Odoo
-#         run: |
-#           cd /home/prixgen/Downloads/dms-docker
-#           docker compose restart odoo
-
-#       - name: Check Status
-#         run: |
-#           docker ps
-#     branches:
-#       - main
-#     paths:
-#       - "custom-addons/**"
-#       - "odoo.conf"
-
-# concurrency:
-#   group: deploy-addons
-#   cancel-in-progress: true
-
-# jobs:
-#   deploy:
-#     runs-on: self-hosted
-
-#     steps:
-#       # - name: Checkout Repository
-#       #   uses: actions/checkout@v4
-
-#       - name: Pull latest changes
-#         run: |
-#           cd /opt/odoo
-#           git pull origin main
-
-#       - name: Restart Odoo
-#         run: |
-#           cd /opt/odoo
-#           docker compose restart odoo
-
-#       - name: Check Status
-#         run: |
-#           docker ps
+      - name: Check Status
+        run: |
+          docker ps
