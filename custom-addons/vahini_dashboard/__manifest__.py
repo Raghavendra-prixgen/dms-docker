@@ -4,7 +4,7 @@
     'author': 'Prixgen Tech Solutions Pvt. Ltd.',
     'website': 'https://www.prixgen.com',
     'company': 'Prixgen Tech Solutions Pvt. Ltd.',
-    'category': 'Uncategorized',
+    'category': 'Uncategorized',       
     'App origin': 'base',
     'version': '18.0.0.9',
     'license': 'LGPL-3',
