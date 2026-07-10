@@ -8,28 +8,66 @@ on:
       - "custom-addons/**"
       - "odoo.conf"
 
-concurrency:
-  group: deploy-addons
-  cancel-in-progress: true
-
 jobs:
   deploy:
     runs-on: self-hosted
 
     steps:
-      # - name: Checkout Repository
-      #   uses: actions/checkout@v4
+      - name: Debug
+        run: |
+          whoami
+          pwd
+          groups
+          docker ps
 
       - name: Pull latest changes
         run: |
-          cd /opt/odoo
+          cd /home/prixgen/Downloads/dms-docker
           git pull origin main
 
       - name: Restart Odoo
         run: |
-          cd /opt/odoo
+          cd /home/prixgen/Downloads/dms-docker
           docker compose restart odoo
 
       - name: Check Status
         run: |
           docker ps
+
+
+
+# name: Deploy Odoo Addons
+
+# on:
+#   push:
+#     branches:
+#       - main
+#     paths:
+#       - "custom-addons/**"
+#       - "odoo.conf"
+
+# concurrency:
+#   group: deploy-addons
+#   cancel-in-progress: true
+
+# jobs:
+#   deploy:
+#     runs-on: self-hosted
+
+#     steps:
+#       # - name: Checkout Repository
+#       #   uses: actions/checkout@v4
+
+#       - name: Pull latest changes
+#         run: |
+#           cd /opt/odoo
+#           git pull origin main
+
+#       - name: Restart Odoo
+#         run: |
+#           cd /opt/odoo
+#           docker compose restart odoo
+
+#       - name: Check Status
+#         run: |
+#           docker ps
