@@ -1,14 +1,14 @@
-name: Manual Deploy
+# name: Manual Deploy
 
-on:
-  workflow_dispatch:
+# on:
+#   workflow_dispatch:
 
-jobs:
-  deploy:
-    runs-on: self-hosted
+# jobs:
+#   deploy:
+#     runs-on: self-hosted
 
-    steps:
-      - run: |
-          cd /opt/odoo
-          git pull origin main
-          docker compose up -d
+#     steps:
+#       - run: |
+#           cd /opt/odoo
+#           git pull origin main
+#           docker compose up -d

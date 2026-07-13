@@ -1,0 +1,32 @@
+pipeline {
+    agent any
+
+    environment {
+        APP_DIR = "/home/prixgen/Downloads/dms-docker"
+    }
+
+    stages {
+
+        stage('Pull Latest Code') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        git checkout main
+                        git pull origin main
+                    '''
+                }
+            }
+        }
+
+        stage('Restart Odoo') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        docker compose restart odoo
+                    '''
+                }
+            }
+        }
+
+    }
+}

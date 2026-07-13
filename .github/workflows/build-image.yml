@@ -1,36 +1,36 @@
-name: Rebuild Odoo Image
+# name: Rebuild Odoo Image
 
-on:
-  push:
-    branches:
-      - main
-    paths:
-      - "Dockerfile"
-      - "requirements.txt"
-      - "docker-compose.yml"
+# on:
+#   push:
+#     branches:
+#       - main
+#     paths:
+#       - "Dockerfile"
+#       - "requirements.txt"
+#       - "docker-compose.yml"
 
-jobs:
-  build:
-    runs-on: self-hosted
+# jobs:
+#   build:
+#     runs-on: self-hosted
 
-    steps:
-      - uses: actions/checkout@v4
+#     steps:
+#       - uses: actions/checkout@v4
 
-      - name: Pull Latest Code
-        run: |
-          cd /opt/odoo
-          git pull origin main
+#       - name: Pull Latest Code
+#         run: |
+#           cd /opt/odoo
+#           git pull origin main
 
-      - name: Build Image
-        run: |
-          cd /opt/odoo
-          docker compose build odoo
+#       - name: Build Image
+#         run: |
+#           cd /opt/odoo
+#           docker compose build odoo
 
-      - name: Restart Odoo
-        run: |
-          cd /opt/odoo
-          docker compose up -d odoo
+#       - name: Restart Odoo
+#         run: |
+#           cd /opt/odoo
+#           docker compose up -d odoo
 
-      - name: Remove Dangling Images
-        run: |
-          docker image prune -f
+#       - name: Remove Dangling Images
+#         run: |
+#           docker image prune -f
