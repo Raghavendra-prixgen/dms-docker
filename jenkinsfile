@@ -7,7 +7,7 @@ pipeline {
 
     stages {
 
-        stage('Pull Latest Code') {
+        stage('Pull Latest Code') { 
             steps {
                 dir("${APP_DIR}") {
                     sh '''
