@@ -29,4 +29,13 @@ pipeline {
         }
 
     }
+
+    post {
+        success {
+            echo 'Odoo restarted successfully.'
+        }
+        failure {
+            echo 'Deployment failed.'
+        }
+    }
 }
