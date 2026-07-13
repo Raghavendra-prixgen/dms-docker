@@ -21,7 +21,7 @@ pipeline {
         stage('Restart Odoo') {
             steps {
                 dir("${APP_DIR}") {
-                    sh '''
+                    sh '''  
                         docker compose restart odoo
                     '''
                 }
