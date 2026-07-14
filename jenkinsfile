@@ -3,11 +3,15 @@ pipeline {
 
     environment {
         APP_DIR = "/home/prixgen/Downloads/dms-docker"
+        IMAGE_BUILD_NEEDED = "false"
+        CHANGED_MODULES = ""
+        DELETED_MODULES = ""
+        DATABASES = ""
     }
 
     stages {
 
-        stage('Pull Latest Code') {    
+        stage('Pull Latest Code') {
             steps {
                 dir("${APP_DIR}") {
                     sh '''
@@ -18,24 +22,269 @@ pipeline {
             }
         }
 
-        stage('Restart Odoo') {
+        stage('Determine Target Databases') {
             steps {
                 dir("${APP_DIR}") {
-                    sh '''  
-                        docker compose restart odoo
+                    script {
+                        def commitMsg = sh(
+                            script: 'git log -1 --pretty=%B',
+                            returnStdout: true
+                        ).trim()
+                        echo "Commit message: ${commitMsg}"
+
+                        def matcher = (commitMsg =~ /\[db:([a-zA-Z0-9_,\-]+)\]/)
+
+                        if (matcher.find()) {
+                            env.DATABASES = matcher.group(1)
+                            echo "🎯 Targeting specific databases from commit: ${env.DATABASES}"
+                        } else {
+                            def dbList = sh(
+                                script: '''
+                                    docker compose exec -T db psql -U odoo -t -c "SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres');"
+                                ''',
+                                returnStdout: true
+                            ).trim()
+
+                            def databases = dbList.readLines()
+                                                   .collect { it.trim() }
+                                                   .findAll { it }
+
+                            env.DATABASES = databases.join(',')
+                            echo "🌐 No DB specified — applying to ALL databases: ${env.DATABASES}"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Detect Custom-Addons Changes') {
+            steps {
+                dir("${APP_DIR}") {
+                    script {
+                        // Modules with any modified/added files under custom-addons/
+                        def changedModules = sh(
+                            script: '''
+                                git diff HEAD~1..HEAD --name-only 2>/dev/null | \
+                                grep '^custom-addons/' | \
+                                cut -d'/' -f2 | sort -u
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                        env.CHANGED_MODULES = changedModules.replaceAll('\n', ',')
+                        echo "Changed modules: ${env.CHANGED_MODULES}"
+
+                        // Modules fully deleted (folder removed) under custom-addons/
+                        def deletedModules = sh(
+                            script: '''
+                                git diff HEAD~1..HEAD --name-status 2>/dev/null | \
+                                awk '$1=="D" && $2 ~ /^custom-addons\\// {print $2}' | \
+                                cut -d'/' -f2 | sort -u
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                        env.DELETED_MODULES = deletedModules.replaceAll('\n', ',')
+                        echo "Deleted modules: ${env.DELETED_MODULES}"
+
+                        // Any dependency file changes inside custom-addons (e.g. a module's own requirements)
+                        def depChanges = sh(
+                            script: '''
+                                git diff HEAD~1..HEAD --name-only 2>/dev/null | \
+                                grep '^custom-addons/' | \
+                                grep -E '(requirements\\.txt|__manifest__\\.py)$' || true
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        if (depChanges) {
+                            env.IMAGE_BUILD_NEEDED = "true"
+                            echo "🔨 Image rebuild needed (manifest/requirements changed in custom-addons)"
+                        } else {
+                            echo "✓ No dependency-level changes, restart is sufficient"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Build Image') {
+            when {
+                environment name: 'IMAGE_BUILD_NEEDED', value: 'true'
+            }
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        echo "Building Docker image..."
+                        docker compose build odoo
                     '''
                 }
             }
         }
 
+        stage('Restart Odoo') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        echo "Restarting Odoo container..."
+                        docker compose up -d odoo
+                    '''
+                }
+            }
+        }
+
+        stage('Uninstall Removed Modules') {
+            when {
+                expression { env.DELETED_MODULES?.trim() }
+            }
+            steps {
+                dir("${APP_DIR}") {
+                    script {
+                        def dbs = env.DATABASES.split(',')
+                        def mods = env.DELETED_MODULES.split(',')
+
+                        dbs.each { db ->
+                            mods.each { mod ->
+                                if (mod?.trim()) {
+                                    echo "Uninstalling ${mod} from ${db}..."
+                                    sh """
+                                        docker compose exec -T odoo odoo shell -d ${db} <<EOF
+module = env['ir.module.module'].search([('name', '=', '${mod}')])
+if module:
+    module.button_immediate_uninstall()
+exit()
+EOF
+                                    """
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Update Changed Modules') {
+            when {
+                expression { env.CHANGED_MODULES?.trim() }
+            }
+            steps {
+                dir("${APP_DIR}") {
+                    script {
+                        def dbs = env.DATABASES.split(',')
+
+                        dbs.each { db ->
+                            echo "Updating modules on ${db}..."
+                            sh """
+                                docker compose exec -T odoo odoo -u ${env.CHANGED_MODULES} -d ${db} --stop-after-init
+                            """
+                        }
+                    }
+                }
+            }
+        }
     }
 
     post {
         success {
-            echo 'Odoo restarted successfully.'
+            script {
+                echo "✅ Pipeline completed."
+                echo "Databases targeted: ${env.DATABASES}"
+                if (env.CHANGED_MODULES?.trim()) echo "Updated modules: ${env.CHANGED_MODULES}"
+                if (env.DELETED_MODULES?.trim()) echo "Uninstalled modules: ${env.DELETED_MODULES}"
+                if (env.IMAGE_BUILD_NEEDED == 'true') echo "Image was rebuilt."
+            }
         }
         failure {
-            echo 'Deployment failed.'
+            echo '❌ Deployment failed.'
         }
     }
 }
+
+
+// pipeline {
+//     agent any
+
+//     environment {
+//         APP_DIR = "/home/prixgen/Downloads/dms-docker"
+//         IMAGE_BUILD_NEEDED = "false"
+//     }
+
+//     stages {
+
+//         stage('Pull Latest Code') {    
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh '''
+//                         git checkout main
+//                         git pull origin main
+//                     '''
+//                 }
+//             }
+//         }
+
+//         stage('Detect Changes') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     script {
+//                         def changedFiles = sh(
+//                             script: 'git diff HEAD~1..HEAD --name-only 2>/dev/null || git diff --cached --name-only',
+//                             returnStdout: true
+//                         ).trim()
+                        
+//                         echo "Changed files:\n${changedFiles}"
+                        
+//                         // Check if image build-related files changed
+//                         if (changedFiles.contains('Dockerfile') || 
+//                             changedFiles.contains('requirements.txt') || 
+//                             changedFiles.contains('setup.py') ||
+//                             changedFiles.contains('setup.cfg')) {
+//                             env.IMAGE_BUILD_NEEDED = "true"
+//                             echo "🔨 Image rebuild needed (Dockerfile or dependencies changed)"
+//                         } else {
+//                             echo "✓ Only addon files changed, restart is sufficient"
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+
+//         stage('Build Image') {
+//             when {
+//                 environment name: 'IMAGE_BUILD_NEEDED', value: 'true'
+//             }
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh '''
+//                         echo "Building Docker image..."
+//                         docker compose build odoo
+//                     '''
+//                 }
+//             }
+//         }
+
+//         stage('Restart Odoo') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh '''
+//                         echo "Restarting Odoo container..."
+//                         docker compose up -d odoo
+//                     '''
+//                 }
+//             }
+//         }
+
+//     }
+
+//     post {
+//         success {
+//             script {
+//                 if (env.IMAGE_BUILD_NEEDED == 'true') {
+//                     echo '✓ Docker image rebuilt and Odoo restarted successfully.'
+//                 } else {
+//                     echo '✓ Odoo restarted successfully.'
+//                 }
+//             }
+//         }
+//         failure {
+//             echo '❌ Deployment failed.'
+//         }
+//     }
+// }
