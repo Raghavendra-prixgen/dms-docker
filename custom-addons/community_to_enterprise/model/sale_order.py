@@ -50,6 +50,7 @@ class DraftPartner(models.Model):
     @api.constrains('mobile')
     def _check_duplicate_draft_partner_mobile(self):
         moves = self.filtered(lambda move: move.mobile)
+        print("moves",moves)
         if not moves:
             return
         self.env["draft.partner"].flush_model([ "mobile",])
