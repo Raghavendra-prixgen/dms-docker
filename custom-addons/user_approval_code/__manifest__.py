@@ -8,7 +8,7 @@
     'company': 'Prixgen Tech Solutions Pvt. Ltd.',
     'category': 'Uncategorized',
     'App origin': 'base',
-    'version': '18.0.0.3000',
+    'version': '18.0.0.3100',
     'license': 'LGPL-3',   
     'depends': ['base','mail','account'],
     'data': [
