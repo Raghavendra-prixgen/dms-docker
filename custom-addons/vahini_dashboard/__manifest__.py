@@ -11,7 +11,7 @@
     'depends': ['web', 'account', 'sale'],
     'data': [
         'security/ir.model.access.csv',
-        'views/vahini_dashboard_views.xml',
+        'views/vahini_dashboard_views.xml',   
     ],
     'assets': {
         'web.assets_backend': [
