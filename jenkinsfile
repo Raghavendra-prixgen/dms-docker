@@ -1,3 +1,138 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'MODULE_OVERRIDE', defaultValue: '', description: 'Optional: module name(s) to deploy (comma-separated). Leave blank to auto-detect from commit.')
+        string(name: 'DATABASE_OVERRIDE', defaultValue: '', description: 'Optional: target database(s) (comma-separated). Leave blank to auto-detect from commit message.')
+    }
+
+    environment {
+        APP_DIR = "/home/prixgen/Downloads/dms-docker"
+    }
+
+    stages {
+
+        stage('Pull Latest Code') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        git checkout main 
+                        git pull origin main
+                    '''
+                }
+            }
+        }
+
+        stage('Detect Module and DB') {
+            steps {
+                dir("${APP_DIR}") {
+                    script {
+                        def changedModules = sh(
+                            script: '''
+                                git diff HEAD~1..HEAD --name-only | \
+                                grep '^custom-addons/' | \
+                                cut -d'/' -f2 | sort -u
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                        def allChangedModules = changedModules ? changedModules.split('\n') as List : []
+                        echo "All modules changed in this commit: ${allChangedModules.join(',')}"
+
+                        def commitMsg = sh(
+                            script: 'git log -1 --pretty=%B',
+                            returnStdout: true
+                        ).trim()
+                        echo "Commit message: ${commitMsg}"
+
+                        // Priority 1: manual override from Jenkins UI button
+                        if (params.MODULE_OVERRIDE?.trim()) {
+                            env.MODULE = params.MODULE_OVERRIDE.trim()
+                            echo "🖱️ Using manually entered module(s): ${env.MODULE}"
+                        } else {
+                            def moduleMatcher = (commitMsg =~ /\[module:([a-zA-Z0-9_,\-]+)\]/)
+                            if (moduleMatcher.find()) {
+                                def requestedModules = moduleMatcher.group(1).split(',').collect { it.trim() }
+                                def validModules = requestedModules.findAll { allChangedModules.contains(it) }
+                                def invalidModules = requestedModules - validModules
+
+                                if (invalidModules) {
+                                    echo "⚠️ Ignoring requested module(s) not found in changes: ${invalidModules.join(',')}"
+                                }
+                                if (!validModules) {
+                                    error("❌ None of the requested modules in [module:...] tag match actual changed files. Changed modules were: ${allChangedModules.join(',')}")
+                                }
+
+                                env.MODULE = validModules.join(',')
+                                echo "🎯 Deploying SELECTED module(s) only: ${env.MODULE}"
+                            } else {
+                                if (!allChangedModules) {
+                                    error("❌ No changes detected under custom-addons/ in this commit.")
+                                }
+                                env.MODULE = allChangedModules.join(',')
+                                echo "📦 No [module:...] tag — deploying ALL changed modules: ${env.MODULE}"
+                            }
+                        }
+
+                        // Priority 1: manual override from Jenkins UI button
+                        if (params.DATABASE_OVERRIDE?.trim()) {
+                            env.DATABASES = params.DATABASE_OVERRIDE.trim()
+                            echo "🖱️ Using manually entered DB(s): ${env.DATABASES}"
+                        } else {
+                            def dbMatcher = (commitMsg =~ /\[db:([a-zA-Z0-9_,\-]+)\]/)
+                            if (dbMatcher.find()) {
+                                env.DATABASES = dbMatcher.group(1)
+                                echo "🎯 Target DB(s) from commit: ${env.DATABASES}"
+                            } else {
+                                error("❌ No [db:name] tag found in commit message, and no DATABASE_OVERRIDE provided.")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Update Module') {
+            when {
+                expression { env.MODULE?.trim() }
+            }
+            steps {
+                dir("${APP_DIR}") {
+                    script {
+                        def dbs = env.DATABASES.split(',')
+                        dbs.each { db ->
+                            echo "Updating ${env.MODULE} on ${db}..."
+                            sh """
+                                docker compose exec -T odoo odoo -u ${env.MODULE} -d ${db} --stop-after-init
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Restart Odoo') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        docker compose restart odoo
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Updated module(s): ${env.MODULE} on DB(s): ${env.DATABASES}"
+        }
+        failure {
+            echo 'Pipeline failed.'
+        }
+    }
+}
+
+
+// version 1.2
 
 // pipeline {
 //     agent any
@@ -144,129 +279,129 @@
 
 //version 1.1
 
-pipeline {
-    agent any
+// pipeline {
+//     agent any
 
-    environment {
-        APP_DIR = "/home/prixgen/Downloads/dms-docker"
-    }
+//     environment {
+//         APP_DIR = "/home/prixgen/Downloads/dms-docker"
+//     }
 
-    stages {
+//     stages {
 
-        stage('Pull Latest Code') {
-            steps {
-                dir("${APP_DIR}") {
-                    sh '''
-                        git checkout main 
-                        git pull origin main
-                    '''
-                }
-            }
-        }
+//         stage('Pull Latest Code') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh '''
+//                         git checkout main 
+//                         git pull origin main
+//                     '''
+//                 }
+//             }
+//         }
 
-        stage('Detect Module and DB') {
-            steps {
-                dir("${APP_DIR}") {
-                    script {
-                        // Get ALL changed module name(s) under custom-addons
-                        def changedModules = sh(
-                            script: '''
-                                git diff HEAD~1..HEAD --name-only | \
-                                grep '^custom-addons/' | \
-                                cut -d'/' -f2 | sort -u
-                            ''',
-                            returnStdout: true
-                        ).trim()
-                        def allChangedModules = changedModules ? changedModules.split('\n') as List : []
-                        echo "All modules changed in this commit: ${allChangedModules.join(',')}"
+//         stage('Detect Module and DB') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     script {
+//                         // Get ALL changed module name(s) under custom-addons
+//                         def changedModules = sh(
+//                             script: '''
+//                                 git diff HEAD~1..HEAD --name-only | \
+//                                 grep '^custom-addons/' | \
+//                                 cut -d'/' -f2 | sort -u
+//                             ''',
+//                             returnStdout: true
+//                         ).trim()
+//                         def allChangedModules = changedModules ? changedModules.split('\n') as List : []
+//                         echo "All modules changed in this commit: ${allChangedModules.join(',')}"
 
-                        // Get commit message
-                        def commitMsg = sh(
-                            script: 'git log -1 --pretty=%B',
-                            returnStdout: true
-                        ).trim()
-                        echo "Commit message: ${commitMsg}"
+//                         // Get commit message
+//                         def commitMsg = sh(
+//                             script: 'git log -1 --pretty=%B',
+//                             returnStdout: true
+//                         ).trim()
+//                         echo "Commit message: ${commitMsg}"
 
-                        // Check for [module:name1,name2] tag to select specific modules
-                        def moduleMatcher = (commitMsg =~ /\[module:([a-zA-Z0-9_,\-]+)\]/)
-                        if (moduleMatcher.find()) {
-                            def requestedModules = moduleMatcher.group(1).split(',').collect { it.trim() }
+//                         // Check for [module:name1,name2] tag to select specific modules
+//                         def moduleMatcher = (commitMsg =~ /\[module:([a-zA-Z0-9_,\-]+)\]/)
+//                         if (moduleMatcher.find()) {
+//                             def requestedModules = moduleMatcher.group(1).split(',').collect { it.trim() }
 
-                            // Only keep requested modules that actually changed (safety check)
-                            def validModules = requestedModules.findAll { allChangedModules.contains(it) }
-                            def invalidModules = requestedModules - validModules
+//                             // Only keep requested modules that actually changed (safety check)
+//                             def validModules = requestedModules.findAll { allChangedModules.contains(it) }
+//                             def invalidModules = requestedModules - validModules
 
-                            if (invalidModules) {
-                                echo "⚠️ Ignoring requested module(s) not found in changes: ${invalidModules.join(',')}"
-                            }
+//                             if (invalidModules) {
+//                                 echo "⚠️ Ignoring requested module(s) not found in changes: ${invalidModules.join(',')}"
+//                             }
 
-                            if (!validModules) {
-                                error("❌ None of the requested modules in [module:...] tag match actual changed files. Changed modules were: ${allChangedModules.join(',')}")
-                            }
+//                             if (!validModules) {
+//                                 error("❌ None of the requested modules in [module:...] tag match actual changed files. Changed modules were: ${allChangedModules.join(',')}")
+//                             }
 
-                            env.MODULE = validModules.join(',')
-                            echo "🎯 Deploying SELECTED module(s) only: ${env.MODULE}"
-                        } else {
-                            // No module tag — deploy all changed modules (normal behavior)
-                            if (!allChangedModules) {
-                                error("❌ No changes detected under custom-addons/ in this commit.")
-                            }
-                            env.MODULE = allChangedModules.join(',')
-                            echo "📦 No [module:...] tag — deploying ALL changed modules: ${env.MODULE}"
-                        }
+//                             env.MODULE = validModules.join(',')
+//                             echo "🎯 Deploying SELECTED module(s) only: ${env.MODULE}"
+//                         } else {
+//                             // No module tag — deploy all changed modules (normal behavior)
+//                             if (!allChangedModules) {
+//                                 error("❌ No changes detected under custom-addons/ in this commit.")
+//                             }
+//                             env.MODULE = allChangedModules.join(',')
+//                             echo "📦 No [module:...] tag — deploying ALL changed modules: ${env.MODULE}"
+//                         }
 
-                        // Get DB name(s) from commit message [db:name] or [db:name1,name2]
-                        def dbMatcher = (commitMsg =~ /\[db:([a-zA-Z0-9_,\-]+)\]/)
-                        if (dbMatcher.find()) {
-                            env.DATABASES = dbMatcher.group(1)
-                            echo "🎯 Target DB(s) from commit: ${env.DATABASES}"
-                        } else {
-                            error("❌ No [db:name] tag found in commit message. Please specify a target database, e.g. [db:test1] or [db:test1,test2].")
-                        }
-                    }
-                }
-            }
-        }
+//                         // Get DB name(s) from commit message [db:name] or [db:name1,name2]
+//                         def dbMatcher = (commitMsg =~ /\[db:([a-zA-Z0-9_,\-]+)\]/)
+//                         if (dbMatcher.find()) {
+//                             env.DATABASES = dbMatcher.group(1)
+//                             echo "🎯 Target DB(s) from commit: ${env.DATABASES}"
+//                         } else {
+//                             error("❌ No [db:name] tag found in commit message. Please specify a target database, e.g. [db:test1] or [db:test1,test2].")
+//                         }
+//                     }
+//                 }
+//             }
+//         }
 
-        stage('Update Module') {
-            when {
-                expression { env.MODULE?.trim() }
-            }
-            steps {
-                dir("${APP_DIR}") {
-                    script {
-                        def dbs = env.DATABASES.split(',')
-                        dbs.each { db ->
-                            echo "Updating ${env.MODULE} on ${db}..."
-                            sh """
-                                docker compose exec -T odoo odoo -u ${env.MODULE} -d ${db} --stop-after-init
-                            """
-                        }
-                    }
-                }
-            }
-        }
+//         stage('Update Module') {
+//             when {
+//                 expression { env.MODULE?.trim() }
+//             }
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     script {
+//                         def dbs = env.DATABASES.split(',')
+//                         dbs.each { db ->
+//                             echo "Updating ${env.MODULE} on ${db}..."
+//                             sh """
+//                                 docker compose exec -T odoo odoo -u ${env.MODULE} -d ${db} --stop-after-init
+//                             """
+//                         }
+//                     }
+//                 }
+//             }
+//         }
 
-        stage('Restart Odoo') {
-            steps {
-                dir("${APP_DIR}") {
-                    sh '''
-                        docker compose restart odoo
-                    '''
-                }
-            }
-        }
-    }
+//         stage('Restart Odoo') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh '''
+//                         docker compose restart odoo
+//                     '''
+//                 }
+//             }
+//         }
+//     }
 
-    post {
-        success {
-            echo "Updated module(s): ${env.MODULE} on DB(s): ${env.DATABASES}"
-        }
-        failure {
-            echo 'Pipeline failed.'
-        }
-    }
-}
+//     post {
+//         success {
+//             echo "Updated module(s): ${env.MODULE} on DB(s): ${env.DATABASES}"
+//         }
+//         failure {
+//             echo 'Pipeline failed.'
+//         }
+//     }
+// }
 
 
 //////////////////////////////////////////////////////////////////////////
