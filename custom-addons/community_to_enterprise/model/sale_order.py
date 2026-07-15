@@ -130,6 +130,7 @@ class ProductTemplate(models.Model):
 
     @api.model
     def create(self, vals):
+        __logger = logging.getLogger(__name__, 'ProductTemplate')
         if vals.get('is_enterprise_community'):
             product_category_obj = self.env['product.category'].search([('category_primary_key','=',vals.get('category_primary_key'))])
             vals['categ_id'] = product_category_obj.id
