@@ -3,7 +3,7 @@
     "summary": "DMS Community UI enterprise theme",
     "description": """
     """,
-    "version": "18.0.0.2",
+    "version": "18.0.0.1",
     "category": "",
     "license": "LGPL-3",
     "author": "Prixgen Tech Solutions Pvt. Ltd.",

@@ -3,7 +3,7 @@
     'description':'sale data structure',
     'summary' : "",
     
-    'version': '18.3.2.1',
+    'version': '18.0.0.1',
     'module_type':'official',
     'origin': 'base',
     
