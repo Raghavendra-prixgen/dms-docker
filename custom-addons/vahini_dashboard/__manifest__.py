@@ -6,12 +6,12 @@
     'company': 'Prixgen Tech Solutions Pvt. Ltd.',
     'category': 'Uncategorized',
     'App origin': 'base',
-    'version': '18.0.0.2100',     
+    'version': '18.0.0.9',
     'license': 'LGPL-3',
     'depends': ['web', 'account', 'sale'],
     'data': [
         'security/ir.model.access.csv',
-        'views/vahini_dashboard_views.xml',   
+        'views/vahini_dashboard_views.xml',
     ],
     'assets': {
         'web.assets_backend': [
