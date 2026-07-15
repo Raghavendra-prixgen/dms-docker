@@ -11,7 +11,7 @@ pipeline {
             steps {
                 dir("${APP_DIR}") {
                     sh '''
-                        git checkout main
+                        git checkout main 
                         git pull origin main
                     '''
                 }
