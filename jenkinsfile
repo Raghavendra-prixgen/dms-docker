@@ -34,20 +34,20 @@ pipeline {
                         env.MODULE = changedModules.replaceAll('\n', ',')
                         echo "Module changed: ${env.MODULE}"
 
-                        // Get DB name from commit message [db:name]
+                        // Get DB name(s) from commit message [db:name] or [db:name1,name2]
                         def commitMsg = sh(
                             script: 'git log -1 --pretty=%B',
                             returnStdout: true
                         ).trim()
                         echo "Commit message: ${commitMsg}"
 
-                        def matcher = (commitMsg =~ /\[db:([a-zA-Z0-9_\-]+)\]/)
+                        def matcher = (commitMsg =~ /\[db:([a-zA-Z0-9_,\-]+)\]/)
                         if (matcher.find()) {
-                            env.DATABASE = matcher.group(1)
+                            env.DATABASES = matcher.group(1)
+                            echo "🎯 Target DB(s) from commit: ${env.DATABASES}"
                         } else {
-                            env.DATABASE = "monday"   // default db if none specified
+                            error("❌ No [db:name] tag found in commit message. Please specify a target database, e.g. [db:test1] or [db:test1,test2].")
                         }
-                        echo "Target DB: ${env.DATABASE}"
                     }
                 }
             }
@@ -59,9 +59,15 @@ pipeline {
             }
             steps {
                 dir("${APP_DIR}") {
-                    sh '''
-                        docker compose exec -T odoo odoo -u ${MODULE} -d ${DATABASE} --stop-after-init
-                    '''
+                    script {
+                        def dbs = env.DATABASES.split(',')
+                        dbs.each { db ->
+                            echo "Updating ${env.MODULE} on ${db}..."
+                            sh """
+                                docker compose exec -T odoo odoo -u ${env.MODULE} -d ${db} --stop-after-init
+                            """
+                        }
+                    }
                 }
             }
         }
@@ -79,15 +85,106 @@ pipeline {
 
     post {
         success {
-            echo "✅ Updated module(s): ${env.MODULE} on DB: ${env.DATABASE}"
+            echo "Updated module(s): ${env.MODULE} on DB(s): ${env.DATABASES}"
         }
         failure {
-            echo '❌ Pipeline failed.'
+            echo 'Pipeline failed.'
         }
     }
 }
 
+//////////////////////////////////////////////////////////////////////////
 
+// pipeline {
+//     agent any
+
+//     environment {
+//         APP_DIR = "/home/prixgen/Downloads/dms-docker"
+//     }
+
+//     stages {
+
+//         stage('Pull Latest Code') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh '''
+//                         git checkout main
+//                         git pull origin main
+//                     '''
+//                 }
+//             }
+//         }
+
+//         stage('Detect Module and DB') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     script {
+//                         // Get changed module name(s) under custom-addons
+//                         def changedModules = sh(
+//                             script: '''
+//                                 git diff HEAD~1..HEAD --name-only | \
+//                                 grep '^custom-addons/' | \
+//                                 cut -d'/' -f2 | sort -u
+//                             ''',
+//                             returnStdout: true
+//                         ).trim()
+//                         env.MODULE = changedModules.replaceAll('\n', ',')
+//                         echo "Module changed: ${env.MODULE}"
+
+//                         // Get DB name from commit message [db:name]
+//                         def commitMsg = sh(
+//                             script: 'git log -1 --pretty=%B',
+//                             returnStdout: true
+//                         ).trim()
+//                         echo "Commit message: ${commitMsg}"
+
+//                         def matcher = (commitMsg =~ /\[db:([a-zA-Z0-9_\-]+)\]/)
+//                         if (matcher.find()) {
+//                             env.DATABASE = matcher.group(1)
+//                         } else {
+//                             env.DATABASE = "monday"   // default db if none specified
+//                         }
+//                         echo "Target DB: ${env.DATABASE}"
+//                     }
+//                 }
+//             }
+//         }
+
+//         stage('Update Module') {
+//             when {
+//                 expression { env.MODULE?.trim() }
+//             }
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh '''
+//                         docker compose exec -T odoo odoo -u ${MODULE} -d ${DATABASE} --stop-after-init
+//                     '''
+//                 }
+//             }
+//         }
+
+//         stage('Restart Odoo') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh '''
+//                         docker compose restart odoo
+//                     '''
+//                 }
+//             }
+//         }
+//     }
+
+//     post {
+//         success {
+//             echo "✅ Updated module(s): ${env.MODULE} on DB: ${env.DATABASE}"
+//         }
+//         failure {
+//             echo '❌ Pipeline failed.'
+//         }
+//     }
+// }
+
+///////////////////////////////////////////////////////////////////////////////////
 
 // pipeline {
 //     agent any
