@@ -587,6 +587,7 @@ class ServerSide(models.Model):
     tax_amount = fields.Char('Taxes')
     total_amount = fields.Char('Total')
     integration_id = fields.Boolean('Integration')
+    y_raghavendra = fields.Boolean('Raghavendra')
 
     is_community_enterprise = fields.Boolean(copy=False,store=True,default=False)
     partner_primary_key = fields.Char()
@@ -745,6 +746,7 @@ class ResCompany(models.Model):
     company_code = fields.Char()
     api_token = fields.Char()
     tally_url = fields.Char('Tally Server URL')
+    y_raghavendra = fields.Boolean('Raghavendra')
 
     _sql_constraints = [
         ('api_token_unique', 'unique(api_token)', 'API Token must be unique for each company!')
