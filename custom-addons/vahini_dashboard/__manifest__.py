@@ -6,8 +6,8 @@
     'company': 'Prixgen Tech Solutions Pvt. Ltd.',
     'category': 'Uncategorized',
     'App origin': 'base',
-    'version': '18.0.0.001',
-    'license': 'LGPL-3',
+    'version': '18.0.0.101001',
+    'license': 'LGPL-3',    
     'depends': ['web', 'account', 'sale'],
     'data': [
         'security/ir.model.access.csv',
