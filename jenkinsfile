@@ -49,40 +49,56 @@ pipeline {
         stage('Sync Dev Repo into Deploy Repo') {
             steps {
                 dir("${APP_DIR}") {
-                    sh '''
-                        set -e
+                    script {
+                        sh '''
+                            set -e
 
-                        # bail out clean if workspace is dirty from a previous failed run
-                        if [ -n "$(git status --porcelain)" ]; then
-                            echo "❌ Workspace has uncommitted changes. Aborting to avoid clobbering work."
-                            git status --porcelain
-                            exit 1
-                        fi
+                            # bail out clean if workspace is dirty from a previous failed run
+                            if [ -n "$(git status --porcelain)" ]; then
+                                echo "❌ Workspace has uncommitted changes. Aborting to avoid clobbering work."
+                                git status --porcelain
+                                exit 1
+                            fi
 
-                        git checkout main
-                        git fetch origin main
-                        git reset --hard origin/main
+                            git checkout main
+                            git fetch origin main
+                            git reset --hard origin/main
 
-                        git fetch dev-origin main
+                            git fetch dev-origin main
 
-                        # only pull custom-addons/ from dev repo, nothing else (.gitignore,
-                        # manifests, configs etc. stay independent per-repo)
-                        git checkout dev-origin/main -- custom-addons/
+                            # only pull custom-addons/ from dev repo, nothing else (.gitignore,
+                            # manifests, configs etc. stay independent per-repo)
+                            git checkout dev-origin/main -- custom-addons/
+                            git add custom-addons/
+                        '''
 
-                        git add custom-addons/
+                        def hasChanges = sh(script: 'git diff --cached --quiet', returnStatus: true) != 0
 
-                        if git diff --cached --quiet; then
+                        if (hasChanges) {
+                            // carry dev repo's original commit message forward so
+                            // [db:...] / [module:...] tags survive into the deploy repo
+                            def devMsg = sh(script: 'git log dev-origin/main -1 --pretty=%B', returnStdout: true).trim()
+                            writeFile file: '.sync_commit_msg.txt', text: "Sync custom-addons/ from dms-docker-dev\n\n${devMsg}"
+                            sh '''
+                                git commit -F .sync_commit_msg.txt
+                                rm -f .sync_commit_msg.txt
+                                git push origin main
+                            '''
+                            env.SYNCED = 'true'
+                        } else {
                             echo "ℹ️ No changes to custom-addons/ from dev repo. Nothing to sync."
-                        else
-                            git commit -m "Sync custom-addons/ from dms-docker-dev"
-                            git push origin main
-                        fi
-                    '''
+                            sh 'git reset --hard HEAD'   // discard the empty staged checkout
+                            env.SYNCED = 'false'
+                        }
+                    }
                 }
             }
         }
 
         stage('Detect Module and DB') {
+            when {
+                expression { env.SYNCED == 'true' }
+            }
             steps {
                 dir("${APP_DIR}") {
                     script {
