@@ -10,7 +10,7 @@ pipeline {
         APP_DIR       = "/home/prixgen/Downloads/dms-docker"
         DEPLOY_REPO   = "https://github.com/Raghavendra-prixgen/dms-docker.git"
         DEV_REPO      = "https://github.com/Raghavendra-prixgen/dms-docker-dev.git"
-        GIT_CRED_ID   = "git-pat"   // Jenkins credential ID (PAT)
+        GIT_CRED_ID   = "Raghavendra-prixgen"   // Jenkins credential ID (PAT)
     }
 
     stages {
