@@ -7,22 +7,68 @@ pipeline {
     }
 
     environment {
-        APP_DIR = "/home/prixgen/Downloads/dms-docker"
+        APP_DIR       = "/home/prixgen/Downloads/dms-docker"
+        DEPLOY_REPO   = "https://github.com/Raghavendra-prixgen/dms-docker.git"
+        DEV_REPO      = "https://github.com/Raghavendra-prixgen/dms-docker-dev.git"
+        GIT_CRED_ID   = "git-pat"   // Jenkins credential ID (PAT)
     }
 
     stages {
+
+        stage('Ensure Deploy Repo Exists') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: "${GIT_CRED_ID}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
+                    sh '''
+                        set -e
+                        if [ ! -d "${APP_DIR}/.git" ]; then
+                            echo "Deploy repo not found at ${APP_DIR}, cloning..."
+                            mkdir -p "$(dirname "${APP_DIR}")"
+                            git clone https://${GIT_USER}:${GIT_PAT}@$(echo ${DEPLOY_REPO} | sed 's#https://##') "${APP_DIR}"
+                        fi
+
+                        cd "${APP_DIR}"
+
+                        # make sure origin uses authenticated URL
+                        git remote set-url origin https://${GIT_USER}:${GIT_PAT}@$(echo ${DEPLOY_REPO} | sed 's#https://##')
+
+                        # make sure dev-origin exists and is authenticated
+                        if ! git remote get-url dev-origin >/dev/null 2>&1; then
+                            git remote add dev-origin https://${GIT_USER}:${GIT_PAT}@$(echo ${DEV_REPO} | sed 's#https://##')
+                        else
+                            git remote set-url dev-origin https://${GIT_USER}:${GIT_PAT}@$(echo ${DEV_REPO} | sed 's#https://##')
+                        fi
+                    '''
+                }
+            }
+        }
 
         stage('Sync Dev Repo into Deploy Repo') {
             steps {
                 dir("${APP_DIR}") {
                     sh '''
-                        git checkout main
-                        git fetch dev-origin main
-                        if ! git merge dev-origin/main --no-edit; then
-                            echo "❌ Merge conflict syncing dev repo into deploy repo. Aborting."
-                            git merge --abort
+                        set -e
+
+                        # bail out clean if workspace is dirty from a previous failed run
+                        if [ -n "$(git status --porcelain)" ]; then
+                            echo "❌ Workspace has uncommitted changes. Aborting to avoid clobbering work."
+                            git status --porcelain
                             exit 1
                         fi
+
+                        git checkout main
+                        git fetch origin main
+                        git reset --hard origin/main
+
+                        git fetch dev-origin main
+
+                        if ! git merge dev-origin/main --no-edit --allow-unrelated-histories; then
+                            echo "❌ Merge conflict syncing dev repo into deploy repo. Aborting."
+                            if [ -f .git/MERGE_HEAD ]; then
+                                git merge --abort
+                            fi
+                            exit 1
+                        fi
+
                         git push origin main
                     '''
                 }
@@ -33,16 +79,23 @@ pipeline {
             steps {
                 dir("${APP_DIR}") {
                     script {
+                        // compare against the last commit that existed before this sync,
+                        // not just HEAD~1, so multi-commit pushes aren't missed
+                        def baseCommit = sh(
+                            script: "git rev-parse HEAD@{1} 2>/dev/null || git rev-parse HEAD~1",
+                            returnStdout: true
+                        ).trim()
+
                         def changedModules = sh(
-                            script: '''
-                                git diff HEAD~1..HEAD --name-only | \
+                            script: """
+                                git diff ${baseCommit}..HEAD --name-only | \
                                 grep '^custom-addons/' | \
                                 cut -d'/' -f2 | sort -u
-                            ''',
+                            """,
                             returnStdout: true
                         ).trim()
                         def allChangedModules = changedModules ? changedModules.split('\n') as List : []
-                        echo "All modules changed in this commit: ${allChangedModules.join(',')}"
+                        echo "All modules changed since ${baseCommit}: ${allChangedModules.join(',')}"
 
                         def commitMsg = sh(
                             script: 'git log -1 --pretty=%B',
@@ -115,6 +168,9 @@ pipeline {
         }
 
         stage('Restart Odoo') {
+            when {
+                expression { env.MODULE?.trim() }
+            }
             steps {
                 dir("${APP_DIR}") {
                     sh '''
@@ -134,7 +190,6 @@ pipeline {
         }
     }
 }
-
 /////////////////////////////////////////////////////////////////////
 
 //version 1.3
@@ -439,7 +494,7 @@ pipeline {
 //     }
 // }
 
-
+/////////////////////////////////////////////////////////////////////////
 // version 1.2
 
 // pipeline {
