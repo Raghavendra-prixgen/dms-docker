@@ -37,6 +37,10 @@ pipeline {
                         else
                             git remote set-url dev-origin https://${GIT_USER}:${GIT_PAT}@$(echo ${DEV_REPO} | sed 's#https://##')
                         fi
+
+                        # set git identity for merge commits (Jenkins user has none by default)
+                        git config user.email "jenkins@prixgen.local"
+                        git config user.name "Jenkins CI"
                     '''
                 }
             }
