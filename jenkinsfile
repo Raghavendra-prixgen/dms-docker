@@ -65,15 +65,18 @@ pipeline {
 
                         git fetch dev-origin main
 
-                        if ! git merge dev-origin/main --no-edit --allow-unrelated-histories; then
-                            echo "❌ Merge conflict syncing dev repo into deploy repo. Aborting."
-                            if [ -f .git/MERGE_HEAD ]; then
-                                git merge --abort
-                            fi
-                            exit 1
-                        fi
+                        # only pull custom-addons/ from dev repo, nothing else (.gitignore,
+                        # manifests, configs etc. stay independent per-repo)
+                        git checkout dev-origin/main -- custom-addons/
 
-                        git push origin main
+                        git add custom-addons/
+
+                        if git diff --cached --quiet; then
+                            echo "ℹ️ No changes to custom-addons/ from dev repo. Nothing to sync."
+                        else
+                            git commit -m "Sync custom-addons/ from dms-docker-dev"
+                            git push origin main
+                        fi
                     '''
                 }
             }
