@@ -1,0 +1,159 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'DATABASE_NAME', defaultValue: '', description: 'Staging database to test against. If it does not exist on staging yet, it will be cloned fresh from production.')
+    }
+
+    environment {
+        APP_DIR            = "/home/prixgen/Downloads/dms-docker-staging"
+        REPO_URL           = "https://github.com/Raghavendra-prixgen/dms-docker.git"
+        GIT_CRED_ID        = "Raghavendra-prixgen"
+        PROD_DB_CONTAINER  = "postgres-db"        // production db container name
+        STAGING_DB_CONTAINER = "postgres-db-staging"
+        DB_USER            = "odoo"
+    }
+
+    stages {
+
+        stage('Validate input') {
+            steps {
+                script {
+                    if (!params.BRANCH_NAME?.trim()) {
+                        error("No branch selected.")
+                    }
+                    if (!params.DATABASE_NAME?.trim()) {
+                        error("No database name provided.")
+                    }
+                    echo "Deploying branch '${params.BRANCH_NAME}' to staging, database '${params.DATABASE_NAME}'"
+                }
+            }
+        }
+
+        stage('Ensure staging repo checkout exists') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: "${GIT_CRED_ID}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
+                    sh """
+                        set -e
+                        if [ ! -d "${APP_DIR}/.git" ]; then
+                            echo "Staging checkout not found, cloning..."
+                            mkdir -p "${APP_DIR}"
+                            git clone https://\${GIT_USER}:\${GIT_PAT}@\$(echo ${REPO_URL} | sed 's#https://##') "${APP_DIR}"
+                        fi
+                        cd "${APP_DIR}"
+                        git remote set-url origin https://\${GIT_USER}:\${GIT_PAT}@\$(echo ${REPO_URL} | sed 's#https://##')
+                        git config user.email "jenkins@prixgen.local"
+                        git config user.name "Jenkins CI"
+                    """
+                }
+            }
+        }
+
+        stage('Checkout selected branch') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh """
+                        set -e
+                        if [ -n "\$(git status --porcelain)" ]; then
+                            echo "Workspace has uncommitted changes. Aborting."
+                            git status --porcelain
+                            exit 1
+                        fi
+                        git fetch origin "${params.BRANCH_NAME}"
+                        git checkout "${params.BRANCH_NAME}"
+                        git reset --hard "origin/${params.BRANCH_NAME}"
+                    """
+                }
+            }
+        }
+
+        stage('Ensure staging database exists') {
+            steps {
+                script {
+                    def dbExists = sh(
+                        script: """
+                            docker exec ${STAGING_DB_CONTAINER} psql -U ${DB_USER} -lqt | cut -d'|' -f1 | grep -qw '${params.DATABASE_NAME}' && echo yes || echo no
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    if (dbExists == 'yes') {
+                        echo "Database '${params.DATABASE_NAME}' already exists on staging — reusing it as-is."
+                    } else {
+                        echo "Database '${params.DATABASE_NAME}' not found on staging — cloning fresh from production."
+                        sh """
+                            set -e
+                            docker exec ${PROD_DB_CONTAINER} pg_dump -U ${DB_USER} -Fc '${params.DATABASE_NAME}' > /tmp/prod_clone.dump
+                            docker exec ${STAGING_DB_CONTAINER} psql -U ${DB_USER} -c "CREATE DATABASE \\"${params.DATABASE_NAME}\\";" postgres
+                            docker exec -i ${STAGING_DB_CONTAINER} pg_restore -U ${DB_USER} -d '${params.DATABASE_NAME}' < /tmp/prod_clone.dump || true
+                            rm -f /tmp/prod_clone.dump
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Update module(s) on staging') {
+            steps {
+                dir("${APP_DIR}") {
+                    script {
+                        def changedFiles = sh(
+                            script: "git diff HEAD~1..HEAD --name-only | grep '^custom-addons/' | cut -d'/' -f2 | sort -u || true",
+                            returnStdout: true
+                        ).trim()
+                        def modules = changedFiles ? changedFiles.split('\n') as List : []
+
+                        if (!modules) {
+                            echo "No custom-addons/ changes detected in the last commit — updating all installed modules instead."
+                            sh """
+                                docker compose exec -T odoo-staging odoo -u all -d '${params.DATABASE_NAME}' --stop-after-init
+                            """
+                        } else {
+                            def moduleList = modules.join(',')
+                            echo "Updating modules: ${moduleList}"
+                            sh """
+                                docker compose exec -T odoo-staging odoo -i ${moduleList} -u ${moduleList} -d '${params.DATABASE_NAME}' --stop-after-init
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Point staging Odoo at selected database') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh """
+                        set -e
+                        cat > odoo.conf <<EOF
+[options]
+db_host = db-staging
+db_user = ${DB_USER}
+db_password = odoo
+db_name = ${params.DATABASE_NAME}
+list_db = True
+EOF
+                    """
+                }
+            }
+        }
+
+        stage('Restart staging Odoo') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh 'docker compose restart odoo-staging'
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Staging updated — branch: ${params.BRANCH_NAME}, database: ${params.DATABASE_NAME}"
+            echo "Visit http://<server-ip>:8070"
+        }
+        failure {
+            echo "Staging deploy failed for branch: ${params.BRANCH_NAME}, database: ${params.DATABASE_NAME}"
+        }
+    }
+}
