@@ -12,8 +12,9 @@ pipeline {
         GIT_CRED_ID          = "Raghavendra-prixgen"
         PROD_DB_CONTAINER    = "postgres-db"
         STAGING_DB_CONTAINER = "postgres-db-staging"
+        STAGING_COMPOSE_FILE = "docker-compose.staging.generated.yml"
         DB_USER              = "odoo"
-        BOOTSTRAP_PROD_DB    = "test"   // used only to seed staging's own "main" db the very first time
+        BOOTSTRAP_PROD_DB    = "test"
     }
 
     stages {
@@ -25,7 +26,7 @@ pipeline {
                         error("No branch selected.")
                     }
                     if (!params.DATABASE_NAME?.trim()) {
-                        error("DATABASE_NAME is required — this is the target database for this deploy.")
+                        error("DATABASE_NAME is required.")
                     }
                     echo "Branch: ${params.BRANCH_NAME} | Target DB: ${params.DATABASE_NAME} | Clone from: ${params.CLONE_FROM ?: '(fresh database)'}"
                 }
@@ -38,7 +39,6 @@ pipeline {
                     sh """
                         set -e
                         if [ ! -d "${APP_DIR}/.git" ]; then
-                            echo "Staging checkout not found, cloning..."
                             mkdir -p "${APP_DIR}"
                             git clone https://\${GIT_USER}:\${GIT_PAT}@\$(echo ${REPO_URL} | sed 's#https://##') "${APP_DIR}"
                         fi
@@ -56,7 +56,7 @@ pipeline {
                 dir("${APP_DIR}") {
                     sh """
                         set -e
-                        if [ -n "\$(git status --porcelain)" ]; then
+                        if [ -n "\$(git status --porcelain -- . ':!${STAGING_COMPOSE_FILE}')" ]; then
                             echo "Workspace has uncommitted changes. Aborting."
                             git status --porcelain
                             exit 1
@@ -65,6 +65,55 @@ pipeline {
                         git checkout "${params.BRANCH_NAME}"
                         git reset --hard "origin/${params.BRANCH_NAME}"
                     """
+                }
+            }
+        }
+
+        stage('Generate staging compose from repo file') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh """
+                        set -e
+                        if [ ! -f docker-compose.yml ]; then
+                            echo "docker-compose.yml not found in this branch."
+                            exit 1
+                        fi
+
+                        # derive staging's compose from whatever this branch's own
+                        # docker-compose.yml defines — same image/build reference,
+                        # just renamed services/ports so it never collides with prod
+                        sed \
+                          -e 's/container_name: postgres-db\$/container_name: ${STAGING_DB_CONTAINER}/' \
+                          -e 's/container_name: odoo18\$/container_name: odoo18-staging/' \
+                          -e 's/"5437:5432"/"5438:5432"/' \
+                          -e 's/"8074:8069"/"8070:8069"/' \
+                          -e 's/^  db:/  db-staging:/' \
+                          -e 's/^  odoo:/  odoo-staging:/' \
+                          -e 's/- db\$/- db-staging/' \
+                          -e 's/postgres-data:/postgres-data-staging:/g' \
+                          docker-compose.yml > ${STAGING_COMPOSE_FILE}
+
+                        echo "Generated staging compose file:"
+                        cat ${STAGING_COMPOSE_FILE}
+
+                        # tag both containers with the branch (and db) currently deployed,
+                        # so 'docker ps' / 'docker inspect' show what's actually running
+                        sed -i \
+                          -e "/container_name: ${STAGING_DB_CONTAINER}/a\\    labels: [\\"branch=${params.BRANCH_NAME}\\", \\"database=${params.DATABASE_NAME}\\"]" \
+                          -e "/container_name: odoo18-staging/a\\    labels: [\\"branch=${params.BRANCH_NAME}\\", \\"database=${params.DATABASE_NAME}\\"]" \
+                          ${STAGING_COMPOSE_FILE}
+
+                        echo "Compose file after labeling:"
+                        cat ${STAGING_COMPOSE_FILE}
+                    """
+                }
+            }
+        }
+
+        stage('Bring up staging containers') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh "docker compose -f ${STAGING_COMPOSE_FILE} up -d"
                 }
             }
         }
@@ -92,7 +141,6 @@ pipeline {
                             script: "git log ${baseCommit}..HEAD --pretty=%B",
                             returnStdout: true
                         ).trim()
-                        echo "Commit message(s) in range: ${commitMsg}"
 
                         def moduleMatcher = (commitMsg =~ /\[module:([a-zA-Z0-9_,\-]+)\]/)
                         if (moduleMatcher.find()) {
@@ -119,7 +167,7 @@ pipeline {
                     ).trim()
 
                     if (dbExists == 'yes') {
-                        echo "Database '${params.DATABASE_NAME}' already exists — reusing it as-is."
+                        echo "Database '${params.DATABASE_NAME}' already exists — reusing it."
                         env.IS_FRESH_DB = 'false'
                         return
                     }
@@ -127,9 +175,6 @@ pipeline {
                     if (params.CLONE_FROM?.trim()) {
                         def sourceDb = params.CLONE_FROM.trim()
 
-                        // if cloning from "main" and staging's own "main" replica doesn't exist yet,
-                        // bootstrap it once from actual production — every clone after that stays
-                        // fully within staging's postgres, no more prod involvement
                         def sourceExists = sh(
                             script: """
                                 docker exec ${STAGING_DB_CONTAINER} psql -U ${DB_USER} -lqt | cut -d'|' -f1 | grep -qw '${sourceDb}' && echo yes || echo no
@@ -138,7 +183,7 @@ pipeline {
                         ).trim()
 
                         if (sourceExists == 'no' && sourceDb == 'main') {
-                            echo "Staging has no 'main' replica yet — bootstrapping it from production ('${BOOTSTRAP_PROD_DB}')..."
+                            echo "Bootstrapping staging 'main' from production ('${BOOTSTRAP_PROD_DB}')..."
                             sh """
                                 set -e
                                 docker exec ${PROD_DB_CONTAINER} pg_dump -U ${DB_USER} -Fc '${BOOTSTRAP_PROD_DB}' > /tmp/main_bootstrap.dump
@@ -147,10 +192,10 @@ pipeline {
                                 rm -f /tmp/main_bootstrap.dump
                             """
                         } else if (sourceExists == 'no') {
-                            error("❌ CLONE_FROM database '${sourceDb}' does not exist on staging. Create it first or leave CLONE_FROM blank.")
+                            error("CLONE_FROM database '${sourceDb}' does not exist on staging. Create it first or leave CLONE_FROM blank.")
                         }
 
-                        echo "Cloning '${sourceDb}' into new database '${params.DATABASE_NAME}' (staging-to-staging clone)..."
+                        echo "Cloning '${sourceDb}' into '${params.DATABASE_NAME}'..."
                         sh """
                             set -e
                             docker exec ${STAGING_DB_CONTAINER} pg_dump -U ${DB_USER} -Fc '${sourceDb}' > /tmp/staging_clone.dump
@@ -176,17 +221,11 @@ pipeline {
                     script {
                         if (env.IS_FRESH_DB == 'true') {
                             def toInstall = env.MODULE?.trim() ? "base,${env.MODULE}" : "base"
-                            echo "Fresh database — installing: ${toInstall}"
-                            sh """
-                                docker compose exec -T odoo-staging odoo -i ${toInstall} -d '${params.DATABASE_NAME}' --stop-after-init
-                            """
+                            sh "docker compose -f ${STAGING_COMPOSE_FILE} exec -T odoo-staging odoo -i ${toInstall} -d '${params.DATABASE_NAME}' --stop-after-init"
                         } else if (env.MODULE?.trim()) {
-                            echo "Existing database — upgrading module(s): ${env.MODULE}"
-                            sh """
-                                docker compose exec -T odoo-staging odoo -u ${env.MODULE} -d '${params.DATABASE_NAME}' --stop-after-init
-                            """
+                            sh "docker compose -f ${STAGING_COMPOSE_FILE} exec -T odoo-staging odoo -u ${env.MODULE} -d '${params.DATABASE_NAME}' --stop-after-init"
                         } else {
-                            echo "No specific module changes detected — skipping module update, database is ready as cloned."
+                            echo "No module changes detected — database ready as cloned, nothing to update."
                         }
                     }
                 }
@@ -197,7 +236,6 @@ pipeline {
             steps {
                 dir("${APP_DIR}") {
                     sh """
-                        set -e
                         cat > odoo.conf <<EOF
 [options]
 db_host = db-staging
@@ -214,7 +252,7 @@ EOF
         stage('Restart staging Odoo') {
             steps {
                 dir("${APP_DIR}") {
-                    sh 'docker compose restart odoo-staging'
+                    sh "docker compose -f ${STAGING_COMPOSE_FILE} restart odoo-staging"
                 }
             }
         }
@@ -230,7 +268,6 @@ EOF
         }
     }
 }
-
 
 
 // pipeline {
