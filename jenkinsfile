@@ -3,13 +3,14 @@ pipeline {
 
     parameters {
         string(name: 'MODULE_OVERRIDE', defaultValue: '', description: 'Optional: module name(s) to deploy (comma-separated). Leave blank to auto-detect from commit.')
-        string(name: 'DATABASE_OVERRIDE', defaultValue: '', description: 'Optional: target database(s) (comma-separated). Leave blank to auto-detect from commit message.')
+        string(name: 'DATABASE_OVERRIDE', defaultValue: '', description: 'Optional: target database(s) (comma-separated). Leave blank to use the default database.')
     }
 
     environment {
         APP_DIR       = "/home/prixgen/Downloads/dms-docker"
         DEPLOY_REPO   = "https://github.com/Raghavendra-prixgen/dms-docker.git"
         GIT_CRED_ID   = "Raghavendra-prixgen"   // Jenkins credential ID (PAT)
+        DEFAULT_DATABASE = "test"               // used whenever no DATABASE_OVERRIDE is given
     }
 
     stages {
@@ -50,8 +51,6 @@ pipeline {
                             git reset --hard origin/main
                         '''
 
-                        // compare against the last commit that existed before this push,
-                        // not just HEAD~1, so multi-commit PR merges aren't missed
                         def baseCommit = sh(
                             script: "git rev-parse HEAD@{1} 2>/dev/null || git rev-parse HEAD~1",
                             returnStdout: true
@@ -68,9 +67,6 @@ pipeline {
                         def allChangedModules = changedModules ? changedModules.split('\n') as List : []
                         echo "All modules changed since ${baseCommit}: ${allChangedModules.join(',')}"
 
-                        // scan ALL commit messages in the range, not just the merge commit,
-                        // since GitHub's merge commit message doesn't carry the [db:...] tag
-                        // that lives on the underlying commit from dms-docker-dev
                         def commitMsg = sh(
                             script: "git log ${baseCommit}..HEAD --pretty=%B",
                             returnStdout: true
@@ -105,17 +101,14 @@ pipeline {
                             }
                         }
 
+                        // [db:...] tag support removed — always uses DATABASE_OVERRIDE if given,
+                        // otherwise falls back to the fixed DEFAULT_DATABASE
                         if (params.DATABASE_OVERRIDE?.trim()) {
                             env.DATABASES = params.DATABASE_OVERRIDE.trim()
                             echo "🖱️ Using manually entered DB(s): ${env.DATABASES}"
                         } else {
-                            def dbMatcher = (commitMsg =~ /\[db:([a-zA-Z0-9_,\-]+)\]/)
-                            if (dbMatcher.find()) {
-                                env.DATABASES = dbMatcher.group(1)
-                                echo "🎯 Target DB(s) from commit: ${env.DATABASES}"
-                            } else {
-                                error("❌ No [db:name] tag found in commit message, and no DATABASE_OVERRIDE provided.")
-                            }
+                            env.DATABASES = env.DEFAULT_DATABASE
+                            echo "📦 No DATABASE_OVERRIDE given — deploying to default database: ${env.DATABASES}"
                         }
                     }
                 }
@@ -164,6 +157,175 @@ pipeline {
         }
     }
 }
+////////////////////////////////////////////////////////////////////////////////
+// COMMUNITY EDITION PIPELINE
+
+// pipeline {
+//     agent any
+
+//     parameters {
+//         string(name: 'MODULE_OVERRIDE', defaultValue: '', description: 'Optional: module name(s) to deploy (comma-separated). Leave blank to auto-detect from commit.')
+//         string(name: 'DATABASE_OVERRIDE', defaultValue: '', description: 'Optional: target database(s) (comma-separated). Leave blank to auto-detect from commit message.')
+//     }
+
+//     environment {
+//         APP_DIR       = "/home/prixgen/Downloads/dms-docker"
+//         DEPLOY_REPO   = "https://github.com/Raghavendra-prixgen/dms-docker.git"
+//         GIT_CRED_ID   = "Raghavendra-prixgen"   // Jenkins credential ID (PAT)
+//     }
+
+//     stages {
+
+//         stage('Ensure Deploy Repo Exists') {
+//             steps {
+//                 withCredentials([usernamePassword(credentialsId: "${GIT_CRED_ID}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
+//                     sh '''
+//                         set -e
+//                         if [ ! -d "${APP_DIR}/.git" ]; then
+//                             echo "Deploy repo not found at ${APP_DIR}, cloning..."
+//                             mkdir -p "$(dirname "${APP_DIR}")"
+//                             git clone https://${GIT_USER}:${GIT_PAT}@$(echo ${DEPLOY_REPO} | sed 's#https://##') "${APP_DIR}"
+//                         fi
+
+//                         cd "${APP_DIR}"
+//                         git remote set-url origin https://${GIT_USER}:${GIT_PAT}@$(echo ${DEPLOY_REPO} | sed 's#https://##')
+//                         git config user.email "jenkins@prixgen.local"
+//                         git config user.name "Jenkins CI"
+//                     '''
+//                 }
+//             }
+//         }
+
+//         stage('Detect Module and DB') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     script {
+//                         sh '''
+//                             set -e
+//                             if [ -n "$(git status --porcelain)" ]; then
+//                                 echo "❌ Workspace has uncommitted changes. Aborting."
+//                                 git status --porcelain
+//                                 exit 1
+//                             fi
+//                             git checkout main
+//                             git fetch origin main
+//                             git reset --hard origin/main
+//                         '''
+
+//                         // compare against the last commit that existed before this push,
+//                         // not just HEAD~1, so multi-commit PR merges aren't missed
+//                         def baseCommit = sh(
+//                             script: "git rev-parse HEAD@{1} 2>/dev/null || git rev-parse HEAD~1",
+//                             returnStdout: true
+//                         ).trim()
+
+//                         def changedModules = sh(
+//                             script: """
+//                                 git diff ${baseCommit}..HEAD --name-only | \
+//                                 grep '^custom-addons/' | \
+//                                 cut -d'/' -f2 | sort -u
+//                             """,
+//                             returnStdout: true
+//                         ).trim()
+//                         def allChangedModules = changedModules ? changedModules.split('\n') as List : []
+//                         echo "All modules changed since ${baseCommit}: ${allChangedModules.join(',')}"
+
+//                         // scan ALL commit messages in the range, not just the merge commit,
+//                         // since GitHub's merge commit message doesn't carry the [db:...] tag
+//                         // that lives on the underlying commit from dms-docker-dev
+//                         def commitMsg = sh(
+//                             script: "git log ${baseCommit}..HEAD --pretty=%B",
+//                             returnStdout: true
+//                         ).trim()
+//                         echo "Commit message(s) in range: ${commitMsg}"
+
+//                         if (params.MODULE_OVERRIDE?.trim()) {
+//                             env.MODULE = params.MODULE_OVERRIDE.trim()
+//                             echo "🖱️ Using manually entered module(s): ${env.MODULE}"
+//                         } else {
+//                             def moduleMatcher = (commitMsg =~ /\[module:([a-zA-Z0-9_,\-]+)\]/)
+//                             if (moduleMatcher.find()) {
+//                                 def requestedModules = moduleMatcher.group(1).split(',').collect { it.trim() }
+//                                 def validModules = requestedModules.findAll { allChangedModules.contains(it) }
+//                                 def invalidModules = requestedModules - validModules
+
+//                                 if (invalidModules) {
+//                                     echo "⚠️ Ignoring requested module(s) not found in changes: ${invalidModules.join(',')}"
+//                                 }
+//                                 if (!validModules) {
+//                                     error("❌ None of the requested modules in [module:...] tag match actual changed files. Changed modules were: ${allChangedModules.join(',')}")
+//                                 }
+
+//                                 env.MODULE = validModules.join(',')
+//                                 echo "🎯 Deploying SELECTED module(s) only: ${env.MODULE}"
+//                             } else {
+//                                 if (!allChangedModules) {
+//                                     error("❌ No changes detected under custom-addons/ in this commit.")
+//                                 }
+//                                 env.MODULE = allChangedModules.join(',')
+//                                 echo "📦 No [module:...] tag — deploying ALL changed modules: ${env.MODULE}"
+//                             }
+//                         }
+
+//                         if (params.DATABASE_OVERRIDE?.trim()) {
+//                             env.DATABASES = params.DATABASE_OVERRIDE.trim()
+//                             echo "🖱️ Using manually entered DB(s): ${env.DATABASES}"
+//                         } else {
+//                             def dbMatcher = (commitMsg =~ /\[db:([a-zA-Z0-9_,\-]+)\]/)
+//                             if (dbMatcher.find()) {
+//                                 env.DATABASES = dbMatcher.group(1)
+//                                 echo "🎯 Target DB(s) from commit: ${env.DATABASES}"
+//                             } else {
+//                                 error("❌ No [db:name] tag found in commit message, and no DATABASE_OVERRIDE provided.")
+//                             }
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+
+//         stage('Update Module') {
+//             when {
+//                 expression { env.MODULE?.trim() }
+//             }
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     script {
+//                         def dbs = env.DATABASES.split(',')
+//                         dbs.each { db ->
+//                             echo "Updating ${env.MODULE} on ${db}..."
+//                             sh """
+//                                 docker compose exec -T odoo odoo -i ${env.MODULE} -u ${env.MODULE} -d ${db} --stop-after-init
+//                             """
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+
+//         stage('Restart Odoo') {
+//             when {
+//                 expression { env.MODULE?.trim() }
+//             }
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh '''
+//                         docker compose restart odoo
+//                     '''
+//                 }
+//             }
+//         }
+//     }
+
+//     post {
+//         success {
+//             echo "Updated module(s): ${env.MODULE} on DB(s): ${env.DATABASES}"
+//         }
+//         failure {
+//             echo 'Pipeline failed.'
+//         }
+//     }
+// }
 /////////////////////////////////////////////////////////////////////
 
 //version 1.3
