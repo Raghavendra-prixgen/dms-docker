@@ -2,8 +2,16 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'DATABASE_NAME', defaultValue: '', description: 'Target database name for this staging deploy (e.g. feature_payment). Required.')
-        string(name: 'CLONE_FROM', defaultValue: '', description: 'Optional: existing staging database to clone from (e.g. main, feature_discount). Leave blank for a fresh database with only base + your modules installed.')
+        choice(name: 'ACTION', choices: ['deploy', 'download_db', 'push_db'], description: 'deploy = normal staging deploy | download_db = dump a DB and offer it for download | push_db = restore an uploaded dump into a target container/database')
+
+        string(name: 'DATABASE_NAME', defaultValue: '', description: '[deploy/download_db] Database name to deploy or download.')
+        string(name: 'CLONE_FROM', defaultValue: '', description: '[deploy only] Existing staging database to clone from. Leave blank for a fresh database.')
+
+        choice(name: 'DOWNLOAD_SOURCE_CONTAINER', choices: ['postgres-db-staging', 'postgres-db'], description: '[download_db only] Which container to dump the database from.')
+
+        choice(name: 'PUSH_TARGET_CONTAINER', choices: ['postgres-db-staging', 'postgres-db'], description: '[push_db only] Which container to restore the dump into. Careful selecting postgres-db (production)!')
+        string(name: 'PUSH_TARGET_DB_NAME', defaultValue: '', description: '[push_db only] Database name to create/overwrite in the target container.')
+        file(name: 'DUMP_FILE', description: '[push_db only] The .dump file to upload and restore.')
     }
 
     environment {
@@ -13,13 +21,71 @@ pipeline {
         PROD_DB_CONTAINER    = "postgres-db"
         STAGING_DB_CONTAINER = "postgres-db-staging"
         STAGING_COMPOSE_FILE = "docker-compose.staging.generated.yml"
-        DB_USER              = "odoo"
-        BOOTSTRAP_PROD_DB    = "test"
+        DB_USER               = "odoo"
+        BOOTSTRAP_PROD_DB     = "test"
     }
 
     stages {
 
-        stage('Validate input') {
+        // ============== ACTION: download_db ==============
+        stage('Download DB - dump database') {
+            when { expression { params.ACTION == 'download_db' } }
+            steps {
+                script {
+                    if (!params.DATABASE_NAME?.trim()) {
+                        error("DATABASE_NAME is required for download_db.")
+                    }
+                    def fileName = "${params.DATABASE_NAME}_$(date +%Y%m%d_%H%M%S).dump".replace('$(date +%Y%m%d_%H%M%S)',
+                        new Date().format('yyyyMMdd_HHmmss'))
+                    env.DUMP_OUTPUT_FILE = fileName
+                    sh """
+                        set -e
+                        docker exec ${params.DOWNLOAD_SOURCE_CONTAINER} pg_dump -U ${DB_USER} -Fc '${params.DATABASE_NAME}' > ${fileName}
+                        ls -lh ${fileName}
+                    """
+                }
+            }
+        }
+        stage('Download DB - archive for download') {
+            when { expression { params.ACTION == 'download_db' } }
+            steps {
+                archiveArtifacts artifacts: "${env.DUMP_OUTPUT_FILE}", fingerprint: true
+                echo "Dump ready — download it from this build's 'Artifacts' section in Jenkins: ${env.DUMP_OUTPUT_FILE}"
+            }
+        }
+
+        // ============== ACTION: push_db ==============
+        stage('Push DB - validate input') {
+            when { expression { params.ACTION == 'push_db' } }
+            steps {
+                script {
+                    if (!params.PUSH_TARGET_DB_NAME?.trim()) {
+                        error("PUSH_TARGET_DB_NAME is required for push_db.")
+                    }
+                    if (params.PUSH_TARGET_CONTAINER == 'postgres-db') {
+                        echo "⚠️ WARNING: target is PRODUCTION (postgres-db). Double-check this is intentional."
+                    }
+                }
+            }
+        }
+        stage('Push DB - restore uploaded dump') {
+            when { expression { params.ACTION == 'push_db' } }
+            steps {
+                sh """
+                    set -e
+                    docker cp "\$DUMP_FILE" ${params.PUSH_TARGET_CONTAINER}:/tmp/uploaded.dump
+                    docker exec ${params.PUSH_TARGET_CONTAINER} psql -U ${DB_USER} -c "DROP DATABASE IF EXISTS \\"${params.PUSH_TARGET_DB_NAME}\\";" postgres
+                    docker exec ${params.PUSH_TARGET_CONTAINER} psql -U ${DB_USER} -c "CREATE DATABASE \\"${params.PUSH_TARGET_DB_NAME}\\";" postgres
+                    docker exec ${params.PUSH_TARGET_CONTAINER} pg_restore -U ${DB_USER} -d '${params.PUSH_TARGET_DB_NAME}' /tmp/uploaded.dump || true
+                    docker exec ${params.PUSH_TARGET_CONTAINER} rm -f /tmp/uploaded.dump
+                """
+                echo "Restored into ${params.PUSH_TARGET_CONTAINER}, database: ${params.PUSH_TARGET_DB_NAME}"
+            }
+        }
+
+        // ============== ACTION: deploy (existing full flow) ==============
+        stage('Deploy - validate input') {
+            when { expression { params.ACTION == 'deploy' } }
             steps {
                 script {
                     if (!params.BRANCH_NAME?.trim()) {
@@ -33,7 +99,8 @@ pipeline {
             }
         }
 
-        stage('Ensure staging repo checkout exists') {
+        stage('Deploy - ensure staging repo checkout exists') {
+            when { expression { params.ACTION == 'deploy' } }
             steps {
                 withCredentials([usernamePassword(credentialsId: "${GIT_CRED_ID}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
                     sh """
@@ -51,7 +118,8 @@ pipeline {
             }
         }
 
-        stage('Checkout selected branch') {
+        stage('Deploy - checkout selected branch') {
+            when { expression { params.ACTION == 'deploy' } }
             steps {
                 dir("${APP_DIR}") {
                     sh """
@@ -69,7 +137,8 @@ pipeline {
             }
         }
 
-        stage('Generate staging compose from repo file') {
+        stage('Deploy - generate staging compose from repo file') {
+            when { expression { params.ACTION == 'deploy' } }
             steps {
                 dir("${APP_DIR}") {
                     sh """
@@ -79,9 +148,11 @@ pipeline {
                             exit 1
                         fi
 
-                        # derive staging's compose from whatever this branch's own
-                        # docker-compose.yml defines — same image/build reference,
-                        # just renamed services/ports so it never collides with prod
+                        # strip full-line comments and blank lines first, so leftover
+                        # commented-out blocks in the source file can't accidentally
+                        # match our sed patterns and corrupt the generated file
+                        grep -v '^\s*#' docker-compose.yml | grep -v '^\s*$' > docker-compose.clean.yml
+
                         sed \
                           -e 's/container_name: postgres-db\$/container_name: ${STAGING_DB_CONTAINER}/' \
                           -e 's/container_name: odoo18\$/container_name: odoo18-staging/' \
@@ -91,34 +162,38 @@ pipeline {
                           -e 's/^  odoo:/  odoo-staging:/' \
                           -e 's/- db\$/- db-staging/' \
                           -e 's/postgres-data:/postgres-data-staging:/g' \
-                          docker-compose.yml > ${STAGING_COMPOSE_FILE}
+                          docker-compose.clean.yml > ${STAGING_COMPOSE_FILE}
 
-                        echo "Generated staging compose file:"
-                        cat ${STAGING_COMPOSE_FILE}
+                        rm -f docker-compose.clean.yml
 
-                        # tag both containers with the branch (and db) currently deployed,
-                        # so 'docker ps' / 'docker inspect' show what's actually running
                         sed -i \
                           -e "/container_name: ${STAGING_DB_CONTAINER}/a\\    labels: [\\"branch=${params.BRANCH_NAME}\\", \\"database=${params.DATABASE_NAME}\\"]" \
                           -e "/container_name: odoo18-staging/a\\    labels: [\\"branch=${params.BRANCH_NAME}\\", \\"database=${params.DATABASE_NAME}\\"]" \
                           ${STAGING_COMPOSE_FILE}
-
-                        echo "Compose file after labeling:"
-                        cat ${STAGING_COMPOSE_FILE}
                     """
                 }
             }
         }
 
-        stage('Bring up staging containers') {
+        stage('Deploy - bring up staging containers') {
+            when { expression { params.ACTION == 'deploy' } }
             steps {
                 dir("${APP_DIR}") {
-                    sh "docker compose -f ${STAGING_COMPOSE_FILE} up -d"
+                    sh """
+                        set -e
+                        DUP_COUNT=\$(grep -c 'labels:' ${STAGING_COMPOSE_FILE} || true)
+                        if [ "\$DUP_COUNT" -gt 2 ]; then
+                            echo "❌ Generated compose file has unexpected duplicate 'labels' entries (found \$DUP_COUNT, expected 2). Check docker-compose.yml on this branch for leftover commented-out sections."
+                            exit 1
+                        fi
+                        docker compose -f ${STAGING_COMPOSE_FILE} up -d
+                    """
                 }
             }
         }
 
-        stage('Detect changed modules') {
+        stage('Deploy - detect changed modules') {
+            when { expression { params.ACTION == 'deploy' } }
             steps {
                 dir("${APP_DIR}") {
                     script {
@@ -156,7 +231,8 @@ pipeline {
             }
         }
 
-        stage('Prepare target database') {
+        stage('Deploy - prepare target database') {
+            when { expression { params.ACTION == 'deploy' } }
             steps {
                 script {
                     def dbExists = sh(
@@ -174,7 +250,6 @@ pipeline {
 
                     if (params.CLONE_FROM?.trim()) {
                         def sourceDb = params.CLONE_FROM.trim()
-
                         def sourceExists = sh(
                             script: """
                                 docker exec ${STAGING_DB_CONTAINER} psql -U ${DB_USER} -lqt | cut -d'|' -f1 | grep -qw '${sourceDb}' && echo yes || echo no
@@ -183,7 +258,6 @@ pipeline {
                         ).trim()
 
                         if (sourceExists == 'no' && sourceDb == 'main') {
-                            echo "Bootstrapping staging 'main' from production ('${BOOTSTRAP_PROD_DB}')..."
                             sh """
                                 set -e
                                 docker exec ${PROD_DB_CONTAINER} pg_dump -U ${DB_USER} -Fc '${BOOTSTRAP_PROD_DB}' > /tmp/main_bootstrap.dump
@@ -192,10 +266,9 @@ pipeline {
                                 rm -f /tmp/main_bootstrap.dump
                             """
                         } else if (sourceExists == 'no') {
-                            error("CLONE_FROM database '${sourceDb}' does not exist on staging. Create it first or leave CLONE_FROM blank.")
+                            error("CLONE_FROM database '${sourceDb}' does not exist on staging.")
                         }
 
-                        echo "Cloning '${sourceDb}' into '${params.DATABASE_NAME}'..."
                         sh """
                             set -e
                             docker exec ${STAGING_DB_CONTAINER} pg_dump -U ${DB_USER} -Fc '${sourceDb}' > /tmp/staging_clone.dump
@@ -205,7 +278,6 @@ pipeline {
                         """
                         env.IS_FRESH_DB = 'false'
                     } else {
-                        echo "No CLONE_FROM given — creating a fresh empty database: ${params.DATABASE_NAME}"
                         sh """
                             docker exec ${STAGING_DB_CONTAINER} psql -U ${DB_USER} -c "CREATE DATABASE \\"${params.DATABASE_NAME}\\";" postgres
                         """
@@ -215,7 +287,8 @@ pipeline {
             }
         }
 
-        stage('Install or update module(s)') {
+        stage('Deploy - install or update module(s)') {
+            when { expression { params.ACTION == 'deploy' } }
             steps {
                 dir("${APP_DIR}") {
                     script {
@@ -225,14 +298,15 @@ pipeline {
                         } else if (env.MODULE?.trim()) {
                             sh "docker compose -f ${STAGING_COMPOSE_FILE} exec -T odoo-staging odoo -u ${env.MODULE} -d '${params.DATABASE_NAME}' --stop-after-init"
                         } else {
-                            echo "No module changes detected — database ready as cloned, nothing to update."
+                            echo "No module changes detected."
                         }
                     }
                 }
             }
         }
 
-        stage('Point staging Odoo at target database') {
+        stage('Deploy - point staging Odoo at target database') {
+            when { expression { params.ACTION == 'deploy' } }
             steps {
                 dir("${APP_DIR}") {
                     sh """
@@ -249,7 +323,8 @@ EOF
             }
         }
 
-        stage('Restart staging Odoo') {
+        stage('Deploy - restart staging Odoo') {
+            when { expression { params.ACTION == 'deploy' } }
             steps {
                 dir("${APP_DIR}") {
                     sh "docker compose -f ${STAGING_COMPOSE_FILE} restart odoo-staging"
@@ -260,16 +335,296 @@ EOF
 
     post {
         success {
-            echo "Staging ready — branch: ${params.BRANCH_NAME}, database: ${params.DATABASE_NAME}, cloned from: ${params.CLONE_FROM ?: '(fresh)'}"
-            echo "Visit http://<server-ip>:8070"
+            script {
+                if (params.ACTION == 'deploy') {
+                    echo "Staging ready — branch: ${params.BRANCH_NAME}, database: ${params.DATABASE_NAME}"
+                    echo "Visit http://<server-ip>:8070"
+                } else if (params.ACTION == 'download_db') {
+                    echo "Dump archived: ${env.DUMP_OUTPUT_FILE} — see this build's Artifacts."
+                } else if (params.ACTION == 'push_db') {
+                    echo "Restored into ${params.PUSH_TARGET_CONTAINER}: ${params.PUSH_TARGET_DB_NAME}"
+                }
+            }
         }
         failure {
-            echo "Staging deploy failed for branch: ${params.BRANCH_NAME}, database: ${params.DATABASE_NAME}"
+            echo "Pipeline failed for ACTION: ${params.ACTION}"
         }
     }
 }
 
+///////////////////////////////
+// pipeline {
+//     agent any
 
+//     parameters {
+//         string(name: 'DATABASE_NAME', defaultValue: '', description: 'Target database name for this staging deploy (e.g. feature_payment). Required.')
+//         string(name: 'CLONE_FROM', defaultValue: '', description: 'Optional: existing staging database to clone from (e.g. main, feature_discount). Leave blank for a fresh database with only base + your modules installed.')
+//     }
+
+//     environment {
+//         APP_DIR              = "/home/prixgen/Downloads/dms-docker-staging"
+//         REPO_URL             = "https://github.com/Raghavendra-prixgen/dms-docker.git"
+//         GIT_CRED_ID          = "Raghavendra-prixgen"
+//         PROD_DB_CONTAINER    = "postgres-db"
+//         STAGING_DB_CONTAINER = "postgres-db-staging"
+//         STAGING_COMPOSE_FILE = "docker-compose.staging.generated.yml"
+//         DB_USER              = "odoo"
+//         BOOTSTRAP_PROD_DB    = "test"
+//     }
+
+//     stages {
+
+//         stage('Validate input') {
+//             steps {
+//                 script {
+//                     if (!params.BRANCH_NAME?.trim()) {
+//                         error("No branch selected.")
+//                     }
+//                     if (!params.DATABASE_NAME?.trim()) {
+//                         error("DATABASE_NAME is required.")
+//                     }
+//                     echo "Branch: ${params.BRANCH_NAME} | Target DB: ${params.DATABASE_NAME} | Clone from: ${params.CLONE_FROM ?: '(fresh database)'}"
+//                 }
+//             }
+//         }
+
+//         stage('Ensure staging repo checkout exists') {
+//             steps {
+//                 withCredentials([usernamePassword(credentialsId: "${GIT_CRED_ID}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
+//                     sh """
+//                         set -e
+//                         if [ ! -d "${APP_DIR}/.git" ]; then
+//                             mkdir -p "${APP_DIR}"
+//                             git clone https://\${GIT_USER}:\${GIT_PAT}@\$(echo ${REPO_URL} | sed 's#https://##') "${APP_DIR}"
+//                         fi
+//                         cd "${APP_DIR}"
+//                         git remote set-url origin https://\${GIT_USER}:\${GIT_PAT}@\$(echo ${REPO_URL} | sed 's#https://##')
+//                         git config user.email "jenkins@prixgen.local"
+//                         git config user.name "Jenkins CI"
+//                     """
+//                 }
+//             }
+//         }
+
+//         stage('Checkout selected branch') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh """
+//                         set -e
+//                         if [ -n "\$(git status --porcelain -- . ':!${STAGING_COMPOSE_FILE}')" ]; then
+//                             echo "Workspace has uncommitted changes. Aborting."
+//                             git status --porcelain
+//                             exit 1
+//                         fi
+//                         git fetch origin "${params.BRANCH_NAME}"
+//                         git checkout "${params.BRANCH_NAME}"
+//                         git reset --hard "origin/${params.BRANCH_NAME}"
+//                     """
+//                 }
+//             }
+//         }
+
+//         stage('Generate staging compose from repo file') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh """
+//                         set -e
+//                         if [ ! -f docker-compose.yml ]; then
+//                             echo "docker-compose.yml not found in this branch."
+//                             exit 1
+//                         fi
+
+//                         # derive staging's compose from whatever this branch's own
+//                         # docker-compose.yml defines — same image/build reference,
+//                         # just renamed services/ports so it never collides with prod
+//                         sed \
+//                           -e 's/container_name: postgres-db\$/container_name: ${STAGING_DB_CONTAINER}/' \
+//                           -e 's/container_name: odoo18\$/container_name: odoo18-staging/' \
+//                           -e 's/"5437:5432"/"5438:5432"/' \
+//                           -e 's/"8074:8069"/"8070:8069"/' \
+//                           -e 's/^  db:/  db-staging:/' \
+//                           -e 's/^  odoo:/  odoo-staging:/' \
+//                           -e 's/- db\$/- db-staging/' \
+//                           -e 's/postgres-data:/postgres-data-staging:/g' \
+//                           docker-compose.yml > ${STAGING_COMPOSE_FILE}
+
+//                         echo "Generated staging compose file:"
+//                         cat ${STAGING_COMPOSE_FILE}
+
+//                         # tag both containers with the branch (and db) currently deployed,
+//                         # so 'docker ps' / 'docker inspect' show what's actually running
+//                         sed -i \
+//                           -e "/container_name: ${STAGING_DB_CONTAINER}/a\\    labels: [\\"branch=${params.BRANCH_NAME}\\", \\"database=${params.DATABASE_NAME}\\"]" \
+//                           -e "/container_name: odoo18-staging/a\\    labels: [\\"branch=${params.BRANCH_NAME}\\", \\"database=${params.DATABASE_NAME}\\"]" \
+//                           ${STAGING_COMPOSE_FILE}
+
+//                         echo "Compose file after labeling:"
+//                         cat ${STAGING_COMPOSE_FILE}
+//                     """
+//                 }
+//             }
+//         }
+
+//         stage('Bring up staging containers') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh "docker compose -f ${STAGING_COMPOSE_FILE} up -d"
+//                 }
+//             }
+//         }
+
+//         stage('Detect changed modules') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     script {
+//                         def baseCommit = sh(
+//                             script: "git merge-base origin/main HEAD 2>/dev/null || git rev-parse HEAD~1",
+//                             returnStdout: true
+//                         ).trim()
+
+//                         def changedModules = sh(
+//                             script: """
+//                                 git diff ${baseCommit}..HEAD --name-only | \
+//                                 grep '^custom-addons/' | \
+//                                 cut -d'/' -f2 | sort -u || true
+//                             """,
+//                             returnStdout: true
+//                         ).trim()
+//                         def allChangedModules = changedModules ? changedModules.split('\n') as List : []
+
+//                         def commitMsg = sh(
+//                             script: "git log ${baseCommit}..HEAD --pretty=%B",
+//                             returnStdout: true
+//                         ).trim()
+
+//                         def moduleMatcher = (commitMsg =~ /\[module:([a-zA-Z0-9_,\-]+)\]/)
+//                         if (moduleMatcher.find()) {
+//                             env.MODULE = moduleMatcher.group(1)
+//                         } else if (allChangedModules) {
+//                             env.MODULE = allChangedModules.join(',')
+//                         } else {
+//                             env.MODULE = ''
+//                         }
+//                         echo "Module(s) to install/update: ${env.MODULE ?: '(none detected)'}"
+//                     }
+//                 }
+//             }
+//         }
+
+//         stage('Prepare target database') {
+//             steps {
+//                 script {
+//                     def dbExists = sh(
+//                         script: """
+//                             docker exec ${STAGING_DB_CONTAINER} psql -U ${DB_USER} -lqt | cut -d'|' -f1 | grep -qw '${params.DATABASE_NAME}' && echo yes || echo no
+//                         """,
+//                         returnStdout: true
+//                     ).trim()
+
+//                     if (dbExists == 'yes') {
+//                         echo "Database '${params.DATABASE_NAME}' already exists — reusing it."
+//                         env.IS_FRESH_DB = 'false'
+//                         return
+//                     }
+
+//                     if (params.CLONE_FROM?.trim()) {
+//                         def sourceDb = params.CLONE_FROM.trim()
+
+//                         def sourceExists = sh(
+//                             script: """
+//                                 docker exec ${STAGING_DB_CONTAINER} psql -U ${DB_USER} -lqt | cut -d'|' -f1 | grep -qw '${sourceDb}' && echo yes || echo no
+//                             """,
+//                             returnStdout: true
+//                         ).trim()
+
+//                         if (sourceExists == 'no' && sourceDb == 'main') {
+//                             echo "Bootstrapping staging 'main' from production ('${BOOTSTRAP_PROD_DB}')..."
+//                             sh """
+//                                 set -e
+//                                 docker exec ${PROD_DB_CONTAINER} pg_dump -U ${DB_USER} -Fc '${BOOTSTRAP_PROD_DB}' > /tmp/main_bootstrap.dump
+//                                 docker exec ${STAGING_DB_CONTAINER} psql -U ${DB_USER} -c "CREATE DATABASE \\"main\\";" postgres
+//                                 docker exec -i ${STAGING_DB_CONTAINER} pg_restore -U ${DB_USER} -d main < /tmp/main_bootstrap.dump || true
+//                                 rm -f /tmp/main_bootstrap.dump
+//                             """
+//                         } else if (sourceExists == 'no') {
+//                             error("CLONE_FROM database '${sourceDb}' does not exist on staging. Create it first or leave CLONE_FROM blank.")
+//                         }
+
+//                         echo "Cloning '${sourceDb}' into '${params.DATABASE_NAME}'..."
+//                         sh """
+//                             set -e
+//                             docker exec ${STAGING_DB_CONTAINER} pg_dump -U ${DB_USER} -Fc '${sourceDb}' > /tmp/staging_clone.dump
+//                             docker exec ${STAGING_DB_CONTAINER} psql -U ${DB_USER} -c "CREATE DATABASE \\"${params.DATABASE_NAME}\\";" postgres
+//                             docker exec -i ${STAGING_DB_CONTAINER} pg_restore -U ${DB_USER} -d '${params.DATABASE_NAME}' < /tmp/staging_clone.dump || true
+//                             rm -f /tmp/staging_clone.dump
+//                         """
+//                         env.IS_FRESH_DB = 'false'
+//                     } else {
+//                         echo "No CLONE_FROM given — creating a fresh empty database: ${params.DATABASE_NAME}"
+//                         sh """
+//                             docker exec ${STAGING_DB_CONTAINER} psql -U ${DB_USER} -c "CREATE DATABASE \\"${params.DATABASE_NAME}\\";" postgres
+//                         """
+//                         env.IS_FRESH_DB = 'true'
+//                     }
+//                 }
+//             }
+//         }
+
+//         stage('Install or update module(s)') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     script {
+//                         if (env.IS_FRESH_DB == 'true') {
+//                             def toInstall = env.MODULE?.trim() ? "base,${env.MODULE}" : "base"
+//                             sh "docker compose -f ${STAGING_COMPOSE_FILE} exec -T odoo-staging odoo -i ${toInstall} -d '${params.DATABASE_NAME}' --stop-after-init"
+//                         } else if (env.MODULE?.trim()) {
+//                             sh "docker compose -f ${STAGING_COMPOSE_FILE} exec -T odoo-staging odoo -u ${env.MODULE} -d '${params.DATABASE_NAME}' --stop-after-init"
+//                         } else {
+//                             echo "No module changes detected — database ready as cloned, nothing to update."
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+
+//         stage('Point staging Odoo at target database') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh """
+//                         cat > odoo.conf <<EOF
+// [options]
+// db_host = db-staging
+// db_user = ${DB_USER}
+// db_password = odoo
+// db_name = ${params.DATABASE_NAME}
+// list_db = True
+// EOF
+//                     """
+//                 }
+//             }
+//         }
+
+//         stage('Restart staging Odoo') {
+//             steps {
+//                 dir("${APP_DIR}") {
+//                     sh "docker compose -f ${STAGING_COMPOSE_FILE} restart odoo-staging"
+//                 }
+//             }
+//         }
+//     }
+
+//     post {
+//         success {
+//             echo "Staging ready — branch: ${params.BRANCH_NAME}, database: ${params.DATABASE_NAME}, cloned from: ${params.CLONE_FROM ?: '(fresh)'}"
+//             echo "Visit http://<server-ip>:8070"
+//         }
+//         failure {
+//             echo "Staging deploy failed for branch: ${params.BRANCH_NAME}, database: ${params.DATABASE_NAME}"
+//         }
+//     }
+// }
+
+///////////////////////////////////////////////
 // pipeline {
 //     agent any
 
