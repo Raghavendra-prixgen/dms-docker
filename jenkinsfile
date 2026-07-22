@@ -7,9 +7,10 @@ pipeline {
     }
 
     environment {
-        APP_DIR       = "${env.WORKSPACE}/dms-docker-deploy"
-        DEPLOY_REPO   = "https://github.com/Raghavendra-prixgen/dms-docker.git"
-        GIT_CRED_ID   = "Raghavendra-prixgen"   // Jenkins credential ID (PAT)
+        APP_DIR        = "${env.WORKSPACE}/dms-docker-deploy"   // clean clone, used ONLY for git diff/detection
+        DEPLOY_DIR     = "/home/prixgen/Pictures/dms-docker"     // the REAL, live production stack
+        DEPLOY_REPO    = "https://github.com/Raghavendra-prixgen/dms-docker.git"
+        GIT_CRED_ID    = "Raghavendra-prixgen"
     }
 
     stages {
@@ -115,9 +116,34 @@ pipeline {
                                 error("❌ No [db:name] tag found in commit message, and no DATABASE_OVERRIDE provided.")
                             }
                         }
+                    }
+                }
+            }
+        }
 
-                        // Auto-detect the actual Odoo compose SERVICE name, rather than
-                        // hardcoding it. This avoids confusing service name vs container_name.
+        stage('Sync Live Deployment Dir') {
+            steps {
+                sh '''
+                    set -e
+                    git config --global --add safe.directory "${DEPLOY_DIR}"
+
+                    if [ ! -d "${DEPLOY_DIR}/.git" ]; then
+                        echo "❌ DEPLOY_DIR ${DEPLOY_DIR} is not a git repo. Set it up manually first (git init / clone in place)."
+                        exit 1
+                    fi
+
+                    cd "${DEPLOY_DIR}"
+                    git fetch origin main
+                    git reset --hard origin/main
+                    git clean -fd
+                '''
+            }
+        }
+
+        stage('Detect Odoo Service Name') {
+            steps {
+                dir("${DEPLOY_DIR}") {
+                    script {
                         def detectedService = sh(
                             script: '''
                                 docker compose config --services | grep -iE '^odoo' | head -n1
@@ -126,7 +152,7 @@ pipeline {
                         ).trim()
 
                         if (!detectedService) {
-                            error("❌ Could not auto-detect an 'odoo*' service in docker-compose.yml. Check `docker compose config --services` manually.")
+                            error("❌ Could not auto-detect an 'odoo*' service in docker-compose.yml.")
                         }
 
                         env.ODOO_SERVICE = detectedService
@@ -141,7 +167,7 @@ pipeline {
                 expression { env.MODULE?.trim() }
             }
             steps {
-                dir("${APP_DIR}") {
+                dir("${DEPLOY_DIR}") {
                     script {
                         def dbs = env.DATABASES.split(',')
                         dbs.each { db ->
@@ -160,7 +186,7 @@ pipeline {
                 expression { env.MODULE?.trim() }
             }
             steps {
-                dir("${APP_DIR}") {
+                dir("${DEPLOY_DIR}") {
                     sh '''
                         docker compose restart "${ODOO_SERVICE}"
                     '''
