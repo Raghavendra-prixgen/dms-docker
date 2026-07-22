@@ -7,7 +7,7 @@ pipeline {
     }
 
     environment {
-        APP_DIR       = "/home/prixgen/Downloads/dms-docker"
+        APP_DIR       = "/home/prixgen/Pictures/dms-docker"
         DEPLOY_REPO   = "https://github.com/Raghavendra-prixgen/dms-docker.git"
         GIT_CRED_ID   = "Raghavendra-prixgen"   // Jenkins credential ID (PAT)
     }
