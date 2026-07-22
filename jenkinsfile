@@ -10,6 +10,7 @@ pipeline {
         APP_DIR       = "${env.WORKSPACE}/dms-docker-deploy"
         DEPLOY_REPO   = "https://github.com/Raghavendra-prixgen/dms-docker.git"
         GIT_CRED_ID   = "Raghavendra-prixgen"   // Jenkins credential ID (PAT)
+        ODOO_SERVICE  = "odoo18"                // docker compose service/container name
     }
 
     stages {
@@ -139,7 +140,7 @@ pipeline {
                         dbs.each { db ->
                             echo "Updating ${env.MODULE} on ${db}..."
                             sh """
-                                docker compose exec -T odoo odoo -i ${env.MODULE} -u ${env.MODULE} -d ${db} --stop-after-init
+                                docker compose exec -T ${ODOO_SERVICE} odoo -i ${env.MODULE} -u ${env.MODULE} -d ${db} --stop-after-init
                             """
                         }
                     }
@@ -154,7 +155,7 @@ pipeline {
             steps {
                 dir("${APP_DIR}") {
                     sh '''
-                        docker compose restart odoo
+                        docker compose restart ${ODOO_SERVICE}
                     '''
                 }
             }
