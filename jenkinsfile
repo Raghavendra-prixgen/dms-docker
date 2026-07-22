@@ -10,7 +10,6 @@ pipeline {
         APP_DIR       = "${env.WORKSPACE}/dms-docker-deploy"
         DEPLOY_REPO   = "https://github.com/Raghavendra-prixgen/dms-docker.git"
         GIT_CRED_ID   = "Raghavendra-prixgen"   // Jenkins credential ID (PAT)
-        ODOO_SERVICE  = "odoo18"                // docker compose service/container name
     }
 
     stages {
@@ -20,9 +19,6 @@ pipeline {
                 withCredentials([usernamePassword(credentialsId: "${GIT_CRED_ID}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
                     sh '''
                         set -e
-
-                        # Register this path (wherever it resolves to) as safe for git,
-                        # so ownership checks never block the pipeline.
                         git config --global --add safe.directory "${APP_DIR}"
 
                         if [ ! -d "${APP_DIR}/.git" ]; then
@@ -57,8 +53,6 @@ pipeline {
                             git clean -fd
                         '''
 
-                        // compare against the last commit that existed before this push,
-                        // not just HEAD~1, so multi-commit PR merges aren't missed
                         def baseCommit = sh(
                             script: "git rev-parse HEAD@{1} 2>/dev/null || git rev-parse HEAD~1",
                             returnStdout: true
@@ -75,9 +69,6 @@ pipeline {
                         def allChangedModules = changedModules ? changedModules.split('\n') as List : []
                         echo "All modules changed since ${baseCommit}: ${allChangedModules.join(',')}"
 
-                        // scan ALL commit messages in the range, not just the merge commit,
-                        // since GitHub's merge commit message doesn't carry the [db:...] tag
-                        // that lives on the underlying commit from dms-docker-dev
                         def commitMsg = sh(
                             script: "git log ${baseCommit}..HEAD --pretty=%B",
                             returnStdout: true
@@ -124,6 +115,22 @@ pipeline {
                                 error("❌ No [db:name] tag found in commit message, and no DATABASE_OVERRIDE provided.")
                             }
                         }
+
+                        // Auto-detect the actual Odoo compose SERVICE name, rather than
+                        // hardcoding it. This avoids confusing service name vs container_name.
+                        def detectedService = sh(
+                            script: '''
+                                docker compose config --services | grep -iE '^odoo' | head -n1
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        if (!detectedService) {
+                            error("❌ Could not auto-detect an 'odoo*' service in docker-compose.yml. Check `docker compose config --services` manually.")
+                        }
+
+                        env.ODOO_SERVICE = detectedService
+                        echo "🐳 Detected Odoo compose service: ${env.ODOO_SERVICE}"
                     }
                 }
             }
@@ -140,7 +147,7 @@ pipeline {
                         dbs.each { db ->
                             echo "Updating ${env.MODULE} on ${db}..."
                             sh """
-                                docker compose exec -T ${ODOO_SERVICE} odoo -i ${env.MODULE} -u ${env.MODULE} -d ${db} --stop-after-init
+                                docker compose exec -T ${env.ODOO_SERVICE} odoo -i ${env.MODULE} -u ${env.MODULE} -d ${db} --stop-after-init
                             """
                         }
                     }
@@ -155,7 +162,7 @@ pipeline {
             steps {
                 dir("${APP_DIR}") {
                     sh '''
-                        docker compose restart ${ODOO_SERVICE}
+                        docker compose restart "${ODOO_SERVICE}"
                     '''
                 }
             }
@@ -171,7 +178,6 @@ pipeline {
         }
     }
 }
-
 // pipeline {
 //     agent any
 
