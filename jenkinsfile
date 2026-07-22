@@ -7,7 +7,7 @@ pipeline {
     }
 
     environment {
-        APP_DIR       = "/home/prixgen/Pictures/dms-docker"
+        APP_DIR       = "${env.WORKSPACE}/dms-docker-deploy"
         DEPLOY_REPO   = "https://github.com/Raghavendra-prixgen/dms-docker.git"
         GIT_CRED_ID   = "Raghavendra-prixgen"   // Jenkins credential ID (PAT)
     }
@@ -19,6 +19,11 @@ pipeline {
                 withCredentials([usernamePassword(credentialsId: "${GIT_CRED_ID}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
                     sh '''
                         set -e
+
+                        # Register this path (wherever it resolves to) as safe for git,
+                        # so ownership checks never block the pipeline.
+                        git config --global --add safe.directory "${APP_DIR}"
+
                         if [ ! -d "${APP_DIR}/.git" ]; then
                             echo "Deploy repo not found at ${APP_DIR}, cloning..."
                             mkdir -p "$(dirname "${APP_DIR}")"
@@ -48,6 +53,7 @@ pipeline {
                             git checkout main
                             git fetch origin main
                             git reset --hard origin/main
+                            git clean -fd
                         '''
 
                         // compare against the last commit that existed before this push,
