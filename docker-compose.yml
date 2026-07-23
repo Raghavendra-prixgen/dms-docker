@@ -2,39 +2,73 @@ services:
   db:
     image: postgres:16-bookworm
     container_name: postgres-db
-
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: odoo
-      POSTGRES_PASSWORD: odoo18
-
+      POSTGRES_PASSWORD: odoo
     ports:
       - "5437:5432"
-
     volumes:
       - postgres-data:/var/lib/postgresql/data
-
     restart: unless-stopped
 
   odoo:
     build: .
     container_name: odoo18
-
     depends_on:
       - db
-
     ports:
       - "8074:8069"
-
     volumes:
       - ./custom-addons:/mnt/extra-addons
       - ./odoo.conf:/etc/odoo/odoo.conf
       - ./logs:/var/log/odoo
-
+      - odoo-filestore:/var/lib/odoo/.local/share/Odoo
     restart: unless-stopped
-
     environment:
       TZ: Asia/Kolkata
 
 volumes:
   postgres-data:
+  odoo-filestore:
+
+# services:
+#   db:
+#     image: postgres:16-bookworm
+#     container_name: postgres-db
+
+#     environment:
+#       POSTGRES_DB: postgres
+#       POSTGRES_USER: odoo
+#       POSTGRES_PASSWORD: odoo18
+
+#     ports:
+#       - "5437:5432"
+
+#     volumes:
+#       - postgres-data:/var/lib/postgresql/data
+
+#     restart: unless-stopped
+
+#   odoo:
+#     build: .
+#     container_name: odoo18
+
+#     depends_on:
+#       - db
+
+#     ports:
+#       - "8074:8069"
+
+#     volumes:
+#       - ./custom-addons:/mnt/extra-addons
+#       - ./odoo.conf:/etc/odoo/odoo.conf
+#       - ./logs:/var/log/odoo
+
+#     restart: unless-stopped
+
+#     environment:
+#       TZ: Asia/Kolkata
+
+# volumes:
+#   postgres-data:
